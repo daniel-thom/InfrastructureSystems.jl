@@ -249,11 +249,15 @@ function get_components(
     components::Components,
     filter_func::Union{Nothing, Function} = nothing,
 ) where {T <: InfrastructureSystemsComponent}
+    if filter_func === nothing
+        _filter_func = x -> !is_hidden(x)
+    else
+        _filter_func = x -> filter_func(x) && !is_hidden(x)
+    end
     if isconcretetype(T)
         _components = get(components.data, T, nothing)
-        if !isnothing(filter_func) && !isnothing(_components)
-            _filter_func = x -> filter_func(x.second)
-            _components = values(filter(_filter_func, _components))
+        if !isnothing(_components)
+            _components = values(filter(x -> _filter_func(x.second), _components))
         end
         if isnothing(_components)
             iter = FlattenIteratorWrapper(T, Vector{Base.ValueIterator}([]))
@@ -263,12 +267,35 @@ function get_components(
         end
     else
         types = [x for x in keys(components.data) if x <: T]
-        if isnothing(filter_func)
-            _components = [values(components.data[x]) for x in types]
-        else
-            _filter_func = x -> filter_func(x.second)
-            _components = [values(filter(_filter_func, components.data[x])) for x in types]
+        _components =
+            [values(filter(x -> _filter_func(x.second), components.data[x])) for x in types]
+        iter = FlattenIteratorWrapper(T, _components)
+    end
+
+    @assert_op eltype(iter) == T
+    return iter
+end
+
+function get_hidden_components(
+    ::Type{T},
+    components::Components,
+) where {T <: InfrastructureSystemsComponent}
+    filter_func = x -> is_hidden(x)
+    if isconcretetype(T)
+        _components = get(components.data, T, nothing)
+        if !isnothing(_components)
+            _components = values(filter(x -> filter_func(x.second), _components))
         end
+        if isnothing(_components)
+            iter = FlattenIteratorWrapper(T, Vector{Base.ValueIterator}([]))
+        else
+            iter =
+                FlattenIteratorWrapper(T, Vector{Base.ValueIterator}([values(_components)]))
+        end
+    else
+        types = [x for x in keys(components.data) if x <: T]
+        _components =
+            [values(filter(x -> filter_func(x.second), components.data[x])) for x in types]
         iter = FlattenIteratorWrapper(T, _components)
     end
 

@@ -74,7 +74,9 @@ end
 
 function serialize_struct(val::T) where {T}
     @debug "serialize_struct" val T
-    data = Dict(string(name) => serialize(getfield(val, name)) for name in fieldnames(T))
+    data = Dict{String, Any}(
+        string(name) => serialize(getfield(val, name)) for name in fieldnames(T)
+    )
     add_serialization_metadata!(data, T)
     return data
 end

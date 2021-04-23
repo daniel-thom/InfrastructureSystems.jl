@@ -718,3 +718,24 @@ function get_time_series_by_key(
         count = count,
     )
 end
+
+"""
+Set the component as being composed within another.
+"""
+set_composed!(x::InfrastructureSystemsComponent) = set_composed(get_internal(x))
+
+"""
+Return true if the component as being composed within another.
+"""
+is_composed(x::InfrastructureSystemsComponent) = is_composed(get_internal(x))
+
+"""
+Set the component as being hidden.
+It will not show up in functions like [`get_components`](@ref).
+"""
+set_hidden!(x::InfrastructureSystemsComponent) = set_hidden!(get_internal(x))
+
+"""
+Return true if the component is hidden.
+"""
+is_hidden(x::InfrastructureSystemsComponent) = is_hidden(get_internal(x))

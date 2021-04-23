@@ -595,6 +595,10 @@ function get_components(
     return get_components(T, data.components, filter_func)
 end
 
+function get_hidden_components(::Type{T}, data::SystemData) where {T}
+    return get_hidden_components(T, data.components)
+end
+
 get_components_by_name(::Type{T}, data::SystemData, args...) where {T} =
     get_components_by_name(T, data.components, args...)
 

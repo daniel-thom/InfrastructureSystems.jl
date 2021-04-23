@@ -20,24 +20,41 @@ function deserialize(::Type{SystemUnitsSettings}, data::Dict)
     SystemUnitsSettings(data["base_value"], _UNIT_SYSTEM_MAP[data["unit_system"]])
 end
 
+"""Attributes for components that contained within other components and have non-default behaviors."""
+mutable struct ComponentComposition <: InfrastructureSystemsType
+    "true if the component is composed"
+    is_composed::Bool
+    "true if the component should not be returned from functions like [`get_component`(@ref)]"
+    is_hidden::Bool
+end
+
+function ComponentComposition(; is_composed = false, is_hidden = false)
+    return ComponentComposition(is_composed, is_hidden)
+end
+
 """Internal storage common to InfrastructureSystems types."""
 mutable struct InfrastructureSystemsInternal <: InfrastructureSystemsType
     uuid::Base.UUID
     units_info::Union{Nothing, UnitsData}
+    composition::ComponentComposition
     ext::Union{Nothing, Dict{String, Any}}
 end
 
 """
 Creates InfrastructureSystemsInternal with a new UUID.
 """
-InfrastructureSystemsInternal(; uuid = make_uuid(), units_info = nothing, ext = nothing) =
-    InfrastructureSystemsInternal(uuid, units_info, ext)
+InfrastructureSystemsInternal(;
+    uuid = make_uuid(),
+    units_info = nothing,
+    composition = ComponentComposition(),
+    ext = nothing,
+) = InfrastructureSystemsInternal(uuid, units_info, composition, ext)
 
 """
 Creates InfrastructureSystemsInternal with an existing UUID.
 """
 InfrastructureSystemsInternal(u::UUIDs.UUID) =
-    InfrastructureSystemsInternal(u, nothing, nothing)
+    InfrastructureSystemsInternal(u, nothing, ComponentComposition(), nothing)
 
 """
 Return a user-modifiable dictionary to store extra information.
@@ -94,6 +111,12 @@ function serialize(internal::InfrastructureSystemsInternal)
 
     return data
 end
+
+set_composed!(internal::InfrastructureSystemsInternal) =
+    internal.composition.is_composed = true
+is_composed(internal::InfrastructureSystemsInternal) = internal.composition.is_composed
+set_hidden!(internal::InfrastructureSystemsInternal) = internal.composition.is_hidden = true
+is_hidden(internal::InfrastructureSystemsInternal) = internal.composition.is_hidden
 
 function compare_values(x::InfrastructureSystemsInternal, y::InfrastructureSystemsInternal)
     match = true
