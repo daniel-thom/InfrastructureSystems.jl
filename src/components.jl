@@ -113,9 +113,15 @@ Throws ArgumentError if the component is not stored.
 """
 function remove_component!(
     components::Components,
-    component::T,
+    component::T;
+    make_foreign = false,
 ) where {T <: InfrastructureSystemsComponent}
-    return _remove_component!(T, components, get_name(component))
+    return _remove_component!(
+        T,
+        components,
+        get_name(component),
+        make_foreign = make_foreign,
+    )
 end
 
 """
@@ -126,15 +132,17 @@ Throws ArgumentError if the component is not stored.
 function remove_component!(
     ::Type{T},
     components::Components,
-    name::AbstractString,
+    name::AbstractString;
+    make_foreign = false,
 ) where {T <: InfrastructureSystemsComponent}
-    return _remove_component!(T, components, name)
+    return _remove_component!(T, components, name, make_foreign = make_foreign)
 end
 
 function _remove_component!(
     ::Type{T},
     components::Components,
-    name::AbstractString,
+    name::AbstractString;
+    make_foreign = false,
 ) where {T <: InfrastructureSystemsComponent}
     if !haskey(components.data, T)
         throw(ArgumentError("component $T is not stored"))
@@ -148,7 +156,13 @@ function _remove_component!(
     if isempty(components.data[T])
         pop!(components.data, T)
     end
-    prepare_for_removal!(component)
+
+    if make_foreign
+        set_foreign!(component)
+    else
+        prepare_for_removal!(component)
+    end
+
     @debug "Removed component" T name
     return component
 end

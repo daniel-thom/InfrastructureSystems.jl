@@ -718,3 +718,23 @@ function get_time_series_by_key(
         count = count,
     )
 end
+
+"""
+Set the component as being composed within another.
+"""
+set_composed!(x::InfrastructureSystemsComponent) = set_composed(get_internal(x))
+
+"""
+Return true if the component as being composed within another.
+"""
+is_composed(x::InfrastructureSystemsComponent) = is_composed(get_internal(x))
+
+"""
+Set the component as being foreign.
+"""
+set_foreign!(x::InfrastructureSystemsComponent) = set_foreign!(get_internal(x))
+
+"""
+Return true if the component is foreign.
+"""
+is_foreign(x::InfrastructureSystemsComponent) = is_foreign(get_internal(x))

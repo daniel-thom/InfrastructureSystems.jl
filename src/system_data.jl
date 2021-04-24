@@ -174,7 +174,9 @@ function _attach_time_series_and_serialize!(
     ts::TimeSeriesData;
     skip_if_present = false,
 ) where {T <: TimeSeriesMetadata}
-    _validate_component(data, component)
+    if !is_foreign(component)
+        _validate_component(data, component)
+    end
     check_add_time_series(data.time_series_params, ts)
     check_read_only(data.time_series_storage)
     if has_time_series(component, T, get_name(ts))
@@ -312,6 +314,17 @@ end
 
 function remove_components!(::Type{T}, data::SystemData) where {T}
     return remove_components!(T, data.components)
+end
+
+"""
+This removes the component from the system but leaves the time series attached.
+"""
+function make_component_foreign!(data::SystemData, component)
+    remove_component!(data.components, component, make_foreign = true)
+end
+
+function make_component_foreign!(::Type{T}, data::SystemData, name) where {T}
+    return remove_component!(T, data.components, name, make_foreign = true)
 end
 
 function clear_time_series!(data::SystemData)
