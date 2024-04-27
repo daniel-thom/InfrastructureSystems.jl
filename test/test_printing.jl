@@ -1,14 +1,24 @@
 @testset "Test printing of the system and components" begin
-    sys = create_system_data(; with_time_series = true, time_series_in_memory = true)
+    sys = create_system_data(;
+        with_time_series = true,
+        time_series_in_memory = true,
+        with_supplemental_attributes = true,
+    )
     io = IOBuffer()
     show(io, "text/plain", sys)
     text = String(take!(io))
     @test occursin("TestComponent", text)
     @test occursin("time_series_type", text)
+    @test occursin("Time Series Summary", text)
+    @test occursin("Supplemental Attribute Summary", text)
 end
 
 @testset "Test show_component_tables" begin
-    sys = create_system_data(; with_time_series = true, time_series_in_memory = true)
+    sys = create_system_data(;
+        with_time_series = true,
+        time_series_in_memory = true,
+        with_supplemental_attributes = true,
+    )
     io = IOBuffer()
     IS.show_components(io, sys.components, IS.TestComponent)
     @test occursin("TestComponent", String(take!(io)))
@@ -29,4 +39,10 @@ end
     IS.show_time_series(io, component)
     text = String(take!(io))
     @test occursin("SingleTimeSeries", text)
+
+    @test IS.has_supplemental_attributes(component)
+    io = IOBuffer()
+    IS.show_supplemental_attributes(io, component)
+    text = String(take!(io))
+    @test occursin("GeographicInfo", text)
 end

@@ -30,6 +30,8 @@ function TimeSeriesManager(;
     return TimeSeriesManager(data_store, metadata_store, read_only)
 end
 
+get_database(mgr::TimeSeriesManager) = mgr.metadata_store.db
+
 function add_time_series!(
     mgr::TimeSeriesManager,
     owner::TimeSeriesOwners,
