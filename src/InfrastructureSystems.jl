@@ -68,7 +68,7 @@ Optional interface functions:
 
   Subtypes must implement this method. The default throws a `NotImplementedError`.
   - get_available()
-  The default function is a no-op.
+  Subtypes must implement this method. The default throws a `NotImplementedError`.
   - set_available!()
 
 Subtypes may contain time series and be associated with supplemental attributes.
@@ -107,8 +107,9 @@ abstract type SupplementalAttribute <: InfrastructureSystemsType end
 get_available(value::InfrastructureSystemsComponent) =
     throw(NotImplementedError("get_available", typeof(value)))
 
-"Set the availability of the component."
-set_available!(value::InfrastructureSystemsComponent) = true
+"Set the availability of the component. Subtypes must implement this method."
+set_available!(value::InfrastructureSystemsComponent, val) =
+    throw(NotImplementedError("set_available!", typeof(value)))
 
 "Return the name of the component."
 get_name(value::InfrastructureSystemsComponent) = value.name
