@@ -979,17 +979,11 @@ function serialize(data::SystemData)
                 json_data["time_series_storage_file"] = time_series_base_name
                 json_data["time_series_storage_type"] = "RustTimeSeriesStore"
             else
-                time_series_base_name =
-                    _get_secondary_basename(base, TIME_SERIES_STORAGE_FILE)
-                time_series_storage_file = joinpath(directory, time_series_base_name)
-                serialize(data.time_series_manager.data_store, time_series_storage_file)
-                to_h5_file(
-                    data.time_series_manager.metadata_store,
-                    time_series_storage_file,
+                error(
+                    "Serializing a non-empty $(typeof(data.time_series_manager.data_store)) " *
+                    "system to disk is no longer supported (HDF5 storage was removed). " *
+                    "Create the system with `time_series_backend = :rust` for persistence.",
                 )
-                json_data["time_series_storage_file"] = time_series_base_name
-                json_data["time_series_storage_type"] =
-                    string(typeof(data.time_series_manager.data_store))
             end
         end
         pop!(json_data["internal"]["ext"], SERIALIZATION_METADATA_KEY, nothing)
@@ -1019,25 +1013,10 @@ function deserialize(
                 read_only = time_series_read_only)
         time_series_metadata_store = nothing
     elseif haskey(raw, "time_series_storage_file")
-        if !isfile(raw["time_series_storage_file"])
-            error("time series file $(raw["time_series_storage_file"]) does not exist")
-        end
-        # TODO: need to address this limitation
-        if strip_module_name(raw["time_series_storage_type"]) == "InMemoryTimeSeriesStorage"
-            @info "Deserializing with InMemoryTimeSeriesStorage is currently not supported. Using HDF"
-            #hdf5_storage = Hdf5TimeSeriesStorage(raw["time_series_storage_file"], true)
-            #time_series_storage = InMemoryTimeSeriesStorage(hdf5_storage)
-        end
-        time_series_storage = from_file(
-            Hdf5TimeSeriesStorage,
-            raw["time_series_storage_file"];
-            directory = time_series_directory,
-            read_only = time_series_read_only,
-        )
-        time_series_metadata_store = from_h5_file(
-            TimeSeriesMetadataStore,
-            time_series_storage.file_path,
-            time_series_directory,
+        error(
+            "This system was serialized with the legacy HDF5 time series storage " *
+            "(type = $(get(raw, "time_series_storage_type", "unknown"))), which is no " *
+            "longer supported. HDF5 storage has been removed in favor of the Rust backend.",
         )
     else
         time_series_storage = make_time_series_storage(;

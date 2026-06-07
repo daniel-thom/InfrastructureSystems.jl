@@ -5,16 +5,8 @@
 #     julia --project=. test/test_rust_time_series_store.jl
 #
 # Not part of the default runtests.jl suite because CI does not build the cdylib.
-#
-# HDF5 NOTE: the on-disk backend writes NetCDF4, which links libhdf5; IS.jl also
-# loads HDF5.jl. Two *copies* of libhdf5 in one process corrupt each other
-# ("NetCDF: HDF error") — even at the same version. The fix is to make HDF5.jl
-# use the SAME system libhdf5 the Rust dylib links, so there is a single copy.
-# Configure once (writes LocalPreferences.toml), then restart Julia:
-#   using HDF5
-#   HDF5.API.set_libraries!("/opt/homebrew/opt/hdf5/lib/libhdf5.dylib",
-#                           "/opt/homebrew/opt/hdf5/lib/libhdf5_hl.dylib")
-# With that in place the on-disk testset below passes.
+# IS.jl no longer depends on HDF5, so the on-disk NetCDF path has no libhdf5
+# conflict and needs no special configuration.
 
 using Test
 using Dates
@@ -81,9 +73,7 @@ const FEATS = Dict("model_year" => 2030, "scenario" => "high")  # int + string f
 end
 
 @testset "RustTimeSeriesStore on-disk persistence (.nc + .sqlite)" begin
-    # Requires HDF5.jl configured to share the Rust dylib's system libhdf5 (see
-    # the HDF5 NOTE at the top of this file). Metadata persists as a standalone
-    # SQLite file — never embedded in HDF5.
+    # Metadata persists as a standalone SQLite file — never embedded in HDF5.
     mktempdir() do dir
         base = joinpath(dir, "system_time_series.nc")
         store = IS.RustTimeSeriesStore(; in_memory = false, path = base)

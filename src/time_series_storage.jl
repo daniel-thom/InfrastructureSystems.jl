@@ -73,16 +73,24 @@ function make_time_series_storage(;
     directory = nothing,
     compression = CompressionSettings(),
 )
-    if in_memory
-        storage = InMemoryTimeSeriesStorage()
-    elseif !isnothing(filename)
-        storage = Hdf5TimeSeriesStorage(; filename = filename, compression = compression)
-    else
-        storage =
-            Hdf5TimeSeriesStorage(true; directory = directory, compression = compression)
-    end
+    # HDF5 storage has been removed. The in-memory store is the only pure-Julia
+    # backend; on-disk persistence is provided by the Rust backend
+    # (`RustTimeSeriesStore`, selected with `backend = :rust`).
+    return InMemoryTimeSeriesStorage()
+end
 
-    return storage
+"""
+Open the storage for a batch of operations. The in-memory and Rust backends have
+no file handle to manage, so this just runs `func`.
+"""
+function open_store!(
+    func::Function,
+    ::TimeSeriesStorage,
+    mode = "r",
+    args...;
+    kwargs...,
+)
+    return func(args...; kwargs...)
 end
 
 function make_component_name(component_uuid::UUIDs.UUID, name::AbstractString)
@@ -97,17 +105,8 @@ function deserialize_component_name(component_name::AbstractString)
 end
 
 function serialize(storage::TimeSeriesStorage, file_path::AbstractString)
-    if storage isa Hdf5TimeSeriesStorage
-        if abspath(get_file_path(storage)) == abspath(file_path)
-            error("Attempting to overwrite identical time series file")
-        end
-
-        copy_h5_file(get_file_path(storage), file_path)
-    elseif storage isa InMemoryTimeSeriesStorage
-        convert_to_hdf5(storage, file_path)
-    else
-        error("unsupported type $(typeof(storage))")
-    end
-
-    @info "Serialized time series data to $file_path."
+    error(
+        "Serializing $(typeof(storage)) time series to disk is no longer supported. " *
+        "Use the Rust time series backend (`backend = :rust`) for persistence.",
+    )
 end

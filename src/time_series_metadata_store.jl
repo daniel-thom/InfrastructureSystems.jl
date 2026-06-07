@@ -353,20 +353,6 @@ function _add_migrated_rows!(store::TimeSeriesMetadataStore, rows)
     @debug "Migrated time series assocations table to v1.0.0."
 end
 
-"""
-Load a TimeSeriesMetadataStore from an HDF5 file into an in-memory database.
-"""
-function from_h5_file(::Type{TimeSeriesMetadataStore}, src::AbstractString, directory)
-    data = HDF5.h5open(src, "r") do file
-        file[HDF5_TS_METADATA_ROOT_PATH][:]
-    end
-
-    filename, io = mktemp(isnothing(directory) ? tempdir() : directory)
-    write(io, data)
-    close(io)
-    return TimeSeriesMetadataStore(filename)
-end
-
 function _create_associations_table!(store::TimeSeriesMetadataStore)
     # TODO: SQLite createtable!() doesn't provide a way to create a primary key.
     # https://github.com/JuliaDatabases/SQLite.jl/issues/286
@@ -1426,22 +1412,6 @@ Return the table as a DataFrame.
 """
 function to_dataframe(store::TimeSeriesMetadataStore; table = ASSOCIATIONS_TABLE_NAME)
     return sql(store, "SELECT * FROM $table")
-end
-
-function to_h5_file(store::TimeSeriesMetadataStore, dst::String)
-    metadata_path = backup_to_temp(store)
-    data = open(metadata_path, "r") do io
-        read(io)
-    end
-
-    HDF5.h5open(dst, "r+") do file
-        if HDF5_TS_METADATA_ROOT_PATH in keys(file)
-            HDF5.delete_object(file, HDF5_TS_METADATA_ROOT_PATH)
-        end
-        file[HDF5_TS_METADATA_ROOT_PATH] = data
-    end
-
-    return
 end
 
 function _create_row(

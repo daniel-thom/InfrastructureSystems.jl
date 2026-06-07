@@ -11,18 +11,6 @@ function InMemoryTimeSeriesStorage()
     return storage
 end
 
-"""
-Constructs InMemoryTimeSeriesStorage from an instance of Hdf5TimeSeriesStorage.
-"""
-function InMemoryTimeSeriesStorage(hdf5_storage::Hdf5TimeSeriesStorage)
-    storage = InMemoryTimeSeriesStorage()
-    for (_, time_series) in iterate_time_series(hdf5_storage)
-        serialize_time_series!(storage, time_series)
-    end
-
-    return storage
-end
-
 function open_store!(
     func::Function,
     store::InMemoryTimeSeriesStorage,
@@ -145,14 +133,6 @@ end
 
 function get_num_time_series(storage::InMemoryTimeSeriesStorage)
     return length(storage.data)
-end
-
-function convert_to_hdf5(storage::InMemoryTimeSeriesStorage, filename::AbstractString)
-    create_file = true
-    hdf5_storage = Hdf5TimeSeriesStorage(create_file; filename = filename)
-    for ts in values(storage.data)
-        serialize_time_series!(hdf5_storage, ts)
-    end
 end
 
 function compare_values(

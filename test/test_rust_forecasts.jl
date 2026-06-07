@@ -88,7 +88,6 @@ end
 end
 
 @testset "Deterministic System serialize/deserialize (.nc + .sqlite)" begin
-    # On-disk; needs HDF5.jl sharing the Rust dylib's libhdf5 (LocalPreferences.toml).
     res = Hour(1)
     initial = DateTime(2024, 1, 1)
     data = SortedDict(initial + Hour(i) => collect(Float64, (10 * i):(10 * i + 5)) for i in 0:3)

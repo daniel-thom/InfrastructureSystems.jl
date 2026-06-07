@@ -2,8 +2,6 @@
 # public API, backed by the Rust store (backend=:rust). Requires the cdylib.
 #   TIME_SERIES_STORE_LIB=/path/to/libtime_series_store_ffi.dylib \
 #     julia --project=. test/test_rust_system_integration.jl
-# (For on-disk persistence, HDF5.jl must share the Rust dylib's libhdf5 — see
-#  the HDF5 note in test_rust_time_series_store.jl. This test uses in-memory.)
 
 using Test
 using Dates
@@ -84,7 +82,6 @@ end
 end
 
 @testset "System serialize/deserialize via Rust backend (.nc + .sqlite)" begin
-    # On-disk; requires HDF5.jl to share the Rust dylib's libhdf5 (LocalPreferences.toml).
     initial = DateTime(2024, 1, 1)
     res = Hour(1)
     values = collect(50.0:73.0)
