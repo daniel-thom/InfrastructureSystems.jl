@@ -305,7 +305,8 @@ function get_counts(store::RustTimeSeriesStore)
 end
 
 function get_num_time_series(store::RustTimeSeriesStore)
-    return get_counts(store).static_time_series
+    c = get_counts(store)
+    return c.static_time_series + c.forecasts
 end
 
 function flush!(store::RustTimeSeriesStore)
@@ -357,8 +358,12 @@ function _rust_add_time_series!(
     time_series::TimeSeriesData;
     features...,
 )
+    if time_series isa AbstractDeterministic
+        return _rust_add_forecast!(mgr, owner, time_series; features...)
+    end
     time_series isa SingleTimeSeries ||
-        error("Rust backend supports only SingleTimeSeries (got $(typeof(time_series)))")
+        error("Rust backend supports SingleTimeSeries and Deterministic/" *
+              "DeterministicSingleTimeSeries (got $(typeof(time_series)))")
     store = mgr.data_store::RustTimeSeriesStore
     owner_uuid, owner_type, owner_category = _rust_owner_args(owner)
     name = get_name(time_series)
@@ -399,8 +404,12 @@ function _rust_get_time_series(
     resolution::Union{Nothing, Dates.Period} = nothing,
     features...,
 ) where {T <: TimeSeriesData}
+    if T <: AbstractDeterministic
+        return _rust_get_forecast(owner, name; resolution = resolution, features...)
+    end
     T <: SingleTimeSeries ||
-        error("Rust backend supports only SingleTimeSeries (requested $T)")
+        error("Rust backend supports SingleTimeSeries and Deterministic/" *
+              "DeterministicSingleTimeSeries (requested $T)")
     mgr = get_time_series_manager(owner)
     store = mgr.data_store::RustTimeSeriesStore
     owner_uuid, _, _ = _rust_owner_args(owner)
@@ -424,16 +433,202 @@ function _rust_get_time_series(
     )
 end
 
-"""Route `has_time_series(owner, T, name; ...)` to the Rust store."""
-function _rust_has_time_series(
-    owner::TimeSeriesOwners,
-    name::AbstractString;
+# ---- Forecasts (Deterministic / DeterministicSingleTimeSeries) -------------
+
+const RTS_TYPE_DETERMINISTIC = Int32(2)
+const RTS_TYPE_DETERMINISTIC_SINGLE = Int32(3)
+
+"""Add a forecast: `flat_values` is the flattened storage array."""
+function add_forecast!(
+    store::RustTimeSeriesStore,
+    owner_uuid::AbstractString,
+    owner_type::AbstractString,
+    owner_category::AbstractString,
+    name::AbstractString,
+    ts_type::Integer,
+    initial_timestamp::Dates.DateTime,
+    resolution::Dates.Period,
+    horizon::Dates.Period,
+    interval::Dates.Period,
+    count::Integer,
+    flat_values::Vector{Float64};
+    features = Dict{String, Any}(),
+    units::Union{Nothing, AbstractString} = nothing,
+    scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
+)
+    features_json = _rts_features_json(features)
+    units_ptr = units === nothing ? C_NULL : String(units)
+    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
+    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    code = ccall((:ts_store_add_forecast, rust_ts_lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int32, Int64, Int64, Int64, Int64,
+            UInt64, Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+        store.handle, owner_uuid, owner_type, _rts_owner_category_int(owner_category), name,
+        Int32(ts_type), _rts_to_unix_ns(initial_timestamp), _rts_resolution_to_ns(resolution),
+        _rts_resolution_to_ns(horizon), _rts_resolution_to_ns(interval), UInt64(count),
+        flat_values, UInt64(length(flat_values)), features_json, units_ptr, scaling_ptr, out_key)
+    _rts_check(code)
+    out_key[] != C_NULL &&
+        ccall((:ts_key_free, rust_ts_lib_path()), Cvoid, (Ptr{Cvoid},), out_key[])
+    return
+end
+
+"""Read forecast metadata; returns a named tuple incl `horizon`, `interval`, `count`."""
+function get_forecast_metadata(
+    store::RustTimeSeriesStore,
+    owner_uuid::AbstractString,
+    name::AbstractString,
+    ts_type::Integer;
     resolution::Union{Nothing, Dates.Period} = nothing,
-    features...,
+    features = Dict{String, Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
+    features_json = _rts_features_json(features)
+    oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
+    oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
+    code = ccall((:ts_store_get_forecast_metadata, rust_ts_lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring,
+            Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}),
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json,
+        oi, orr, oh, ov, oc, ol, ohash)
+    _rts_check(code)
+    return (
+        initial_timestamp = _rts_from_unix_ns(oi[]),
+        resolution = Dates.Millisecond(div(orr[], 1_000_000)),
+        horizon = Dates.Millisecond(div(oh[], 1_000_000)),
+        interval = Dates.Millisecond(div(ov[], 1_000_000)),
+        count = Int(oc[]),
+        length = Int(ol[]),
+        data_hash = ohash,
+    )
+end
+
+function has_typed(
+    store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString,
+    ts_type::Integer; resolution::Union{Nothing, Dates.Period} = nothing,
+    features = Dict{String, Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
+    features_json = _rts_features_json(features)
+    out = Ref{Bool}(false)
+    code = ccall((:ts_store_has_typed, rust_ts_lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring, Ref{Bool}),
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json, out)
+    _rts_check(code)
+    return out[]
+end
+
+function remove_typed!(
+    store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString,
+    ts_type::Integer; resolution::Union{Nothing, Dates.Period} = nothing,
+    features = Dict{String, Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
+    features_json = _rts_features_json(features)
+    code = ccall((:ts_store_remove_typed, rust_ts_lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring),
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json)
+    _rts_check(code)
+    return
+end
+
+# Flatten a Deterministic's SortedDict windows column-major: [w1; w2; ...].
+function _flatten_deterministic(ts::Deterministic)
+    windows = collect(values(get_data(ts)))
+    return (Float64.(reduce(vcat, windows)), length(first(windows)), length(windows))
+end
+
+"""Add a Deterministic or DeterministicSingleTimeSeries via the Rust store."""
+function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
+    store = mgr.data_store::RustTimeSeriesStore
+    owner_uuid, owner_type, owner_category = _rust_owner_args(owner)
+    name = get_name(ts)
+    resolution = get_resolution(ts)
+    interval = get_interval(ts)
+    feats = _rust_features(features)
+    isnothing(get_scaling_factor_multiplier(ts)) ||
+        error("scaling_factor_multiplier is not yet supported on the Rust backend")
+
+    if ts isa Deterministic
+        flat, _, count = _flatten_deterministic(ts)
+        ts_type = RTS_TYPE_DETERMINISTIC
+    elseif ts isa DeterministicSingleTimeSeries
+        flat = Float64.(TimeSeries.values(get_data(get_single_time_series(ts))))
+        count = get_count(ts)
+        ts_type = RTS_TYPE_DETERMINISTIC_SINGLE
+    else
+        error("unsupported forecast type $(typeof(ts))")
+    end
+
+    if has_typed(store, owner_uuid, name, ts_type; resolution = resolution, features = feats)
+        throw(ArgumentError("Time series data with duplicate attributes are already stored"))
+    end
+    add_forecast!(store, owner_uuid, owner_type, owner_category, name, ts_type,
+        get_initial_timestamp(ts), resolution, get_horizon(ts), interval, count, flat;
+        features = feats)
+    return ForecastKey(;
+        time_series_type = typeof(ts), name = name,
+        initial_timestamp = get_initial_timestamp(ts), resolution = resolution,
+        horizon = get_horizon(ts), interval = interval, count = count,
+        features = Dict{String, Any}(feats))
+end
+
+"""Reconstruct a forecast from the Rust store (matches the STORED type)."""
+function _rust_get_forecast(
+    owner, name; resolution::Union{Nothing, Dates.Period} = nothing, features...,
 )
     mgr = get_time_series_manager(owner)
     store = mgr.data_store::RustTimeSeriesStore
     owner_uuid, _, _ = _rust_owner_args(owner)
-    return has_time_series(store, owner_uuid, name;
-        resolution = resolution, features = _rust_features(features))
+    feats = _rust_features(features)
+
+    if has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC;
+        resolution = resolution, features = feats)
+        m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC;
+            resolution = resolution, features = feats)
+        flat = get_array_by_hash(store, m.data_hash)
+        horizon_count = div(m.length, m.count)
+        mat = reshape(flat, horizon_count, m.count)
+        data = SortedDict{Dates.DateTime, Vector{Float64}}()
+        for i in 1:(m.count)
+            data[m.initial_timestamp + m.interval * (i - 1)] = mat[:, i]
+        end
+        return Deterministic(; name = String(name), data = data,
+            resolution = m.resolution, interval = m.interval)
+    elseif has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC_SINGLE;
+        resolution = resolution, features = feats)
+        m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC_SINGLE;
+            resolution = resolution, features = feats)
+        arr = get_array_by_hash(store, m.data_hash)
+        timestamps = range(m.initial_timestamp; length = length(arr), step = m.resolution)
+        sts = SingleTimeSeries(; name = String(name),
+            data = TimeSeries.TimeArray(collect(timestamps), arr), resolution = m.resolution)
+        return DeterministicSingleTimeSeries(; single_time_series = sts,
+            initial_timestamp = m.initial_timestamp, interval = m.interval,
+            count = m.count, horizon = m.horizon)
+    end
+    throw(RustTimeSeriesNotFound("no forecast for owner=$owner_uuid name=$name"))
+end
+
+"""Route `has_time_series(owner, T, name; ...)` to the Rust store."""
+function _rust_has_time_series(
+    ::Type{T},
+    owner::TimeSeriesOwners,
+    name::AbstractString;
+    resolution::Union{Nothing, Dates.Period} = nothing,
+    features...,
+) where {T <: TimeSeriesData}
+    mgr = get_time_series_manager(owner)
+    store = mgr.data_store::RustTimeSeriesStore
+    owner_uuid, _, _ = _rust_owner_args(owner)
+    feats = _rust_features(features)
+    if T <: SingleTimeSeries
+        return has_time_series(store, owner_uuid, name; resolution = resolution, features = feats)
+    elseif T <: AbstractDeterministic
+        return has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC;
+            resolution = resolution, features = feats) ||
+               has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC_SINGLE;
+            resolution = resolution, features = feats)
+    end
+    return false
 end

@@ -275,11 +275,22 @@ function remove_time_series!(
 )
     _throw_if_read_only(mgr)
     if _uses_rust_store(mgr)
-        time_series_type <: SingleTimeSeries ||
-            error("Rust backend supports only SingleTimeSeries (got $time_series_type)")
         owner_uuid, _, _ = _rust_owner_args(owner)
-        remove_single!(mgr.data_store, owner_uuid, name;
-            resolution = resolution, features = _rust_features(features))
+        feats = _rust_features(features)
+        if time_series_type <: SingleTimeSeries
+            remove_single!(mgr.data_store, owner_uuid, name;
+                resolution = resolution, features = feats)
+        elseif time_series_type <: AbstractDeterministic
+            for tt in (RTS_TYPE_DETERMINISTIC, RTS_TYPE_DETERMINISTIC_SINGLE)
+                if has_typed(mgr.data_store, owner_uuid, name, tt;
+                    resolution = resolution, features = feats)
+                    remove_typed!(mgr.data_store, owner_uuid, name, tt;
+                        resolution = resolution, features = feats)
+                end
+            end
+        else
+            error("Rust backend does not support $time_series_type")
+        end
         return
     end
     uuids = list_matching_time_series_uuids(

@@ -999,8 +999,7 @@ function has_time_series(
     mgr = get_time_series_manager(val)
     isnothing(mgr) && return false
     if _uses_rust_store(mgr)
-        T <: SingleTimeSeries || return false
-        return _rust_has_time_series(val, name; resolution = resolution, features...)
+        return _rust_has_time_series(T, val, name; resolution = resolution, features...)
     end
     return has_metadata(
         mgr.metadata_store,
