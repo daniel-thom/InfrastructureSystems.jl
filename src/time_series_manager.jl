@@ -282,7 +282,7 @@ function remove_time_series!(
                 resolution = resolution, features = feats)
         elseif time_series_type <: Forecast
             for tt in (RTS_TYPE_DETERMINISTIC, RTS_TYPE_DETERMINISTIC_SINGLE,
-                RTS_TYPE_PROBABILISTIC)
+                RTS_TYPE_PROBABILISTIC, RTS_TYPE_SCENARIOS)
                 if has_typed(mgr.data_store, owner_uuid, name, tt;
                     resolution = resolution, features = feats)
                     remove_typed!(mgr.data_store, owner_uuid, name, tt;

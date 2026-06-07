@@ -438,6 +438,7 @@ end
 const RTS_TYPE_DETERMINISTIC = Int32(2)
 const RTS_TYPE_DETERMINISTIC_SINGLE = Int32(3)
 const RTS_TYPE_PROBABILISTIC = Int32(4)
+const RTS_TYPE_SCENARIOS = Int32(5)
 
 """Add a Probabilistic forecast: `flat_values` is the flattened 3-D storage array."""
 function add_probabilistic!(
@@ -635,6 +636,10 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
         flat = Float64.(TimeSeries.values(get_data(get_single_time_series(ts))))
         count = get_count(ts)
         ts_type = RTS_TYPE_DETERMINISTIC_SINGLE
+    elseif ts isa Scenarios
+        flat = vec(Float64.(get_array_for_hdf(ts)))  # (scenario_count, horizon_count, count)
+        count = get_count(ts)
+        ts_type = RTS_TYPE_SCENARIOS
     else
         error("unsupported forecast type $(typeof(ts))")
     end
@@ -699,6 +704,20 @@ function _rust_get_forecast(
         return DeterministicSingleTimeSeries(; single_time_series = sts,
             initial_timestamp = m.initial_timestamp, interval = m.interval,
             count = m.count, horizon = m.horizon)
+    elseif has_typed(store, owner_uuid, name, RTS_TYPE_SCENARIOS;
+        resolution = resolution, features = feats)
+        m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_SCENARIOS;
+            resolution = resolution, features = feats)
+        flat = get_array_by_hash(store, m.data_hash)
+        horizon_count = Int(div(m.horizon, m.resolution))
+        scenario_count = div(m.length, horizon_count * m.count)
+        arr = reshape(flat, scenario_count, horizon_count, m.count)
+        data = SortedDict{Dates.DateTime, Matrix{Float64}}()
+        for i in 1:(m.count)
+            data[m.initial_timestamp + m.interval * (i - 1)] = permutedims(arr[:, :, i])
+        end
+        return Scenarios(; name = String(name), data = data, scenario_count = scenario_count,
+            resolution = m.resolution, interval = m.interval)
     end
     throw(RustTimeSeriesNotFound("no forecast for owner=$owner_uuid name=$name"))
 end
@@ -725,14 +744,15 @@ function _rust_has_time_series(
     elseif T <: Probabilistic
         return has_typed(store, owner_uuid, name, RTS_TYPE_PROBABILISTIC;
             resolution = resolution, features = feats)
+    elseif T <: Scenarios
+        return has_typed(store, owner_uuid, name, RTS_TYPE_SCENARIOS;
+            resolution = resolution, features = feats)
     elseif T <: Forecast
         # generic forecast query: match any stored forecast type
-        return has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC;
-            resolution = resolution, features = feats) ||
-               has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC_SINGLE;
-            resolution = resolution, features = feats) ||
-               has_typed(store, owner_uuid, name, RTS_TYPE_PROBABILISTIC;
-            resolution = resolution, features = feats)
+        return any(tt -> has_typed(store, owner_uuid, name, tt;
+                resolution = resolution, features = feats),
+            (RTS_TYPE_DETERMINISTIC, RTS_TYPE_DETERMINISTIC_SINGLE,
+                RTS_TYPE_PROBABILISTIC, RTS_TYPE_SCENARIOS))
     end
     return false
 end
