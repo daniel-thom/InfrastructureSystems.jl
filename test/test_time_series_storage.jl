@@ -97,64 +97,19 @@ function test_clear(storage::IS.TimeSeriesStorage)
     @test_throws ArgumentError _deserialize_full(storage, ts)
 end
 
+# HDF5 storage was removed; the in-memory store is the only pure-Julia backend.
+# On-disk persistence (NetCDF + SQLite, compression) is covered by the Rust
+# backend tests (test_rust_*.jl).
 @testset "Test time series storage implementations" begin
-    for in_memory in (true, false)
-        test_add_remove(IS.make_time_series_storage(; in_memory = in_memory))
-        test_get_subset(IS.make_time_series_storage(; in_memory = in_memory))
-        test_clear(IS.make_time_series_storage(; in_memory = in_memory))
-    end
-
-    test_add_remove(IS.make_time_series_storage(; in_memory = false, directory = "."))
-    test_get_subset(IS.make_time_series_storage(; in_memory = false, directory = "."))
-    test_clear(IS.make_time_series_storage(; in_memory = false, directory = "."))
-end
-
-@testset "Test data format version" begin
-    storage = IS.make_time_series_storage(; in_memory = false)
-    @test IS.read_data_format_version(storage) == IS.TIME_SERIES_DATA_FORMAT_VERSION
-end
-
-@testset "Test compression" begin
-    in_memory = false
-    for type in (IS.CompressionTypes.BLOSC, IS.CompressionTypes.DEFLATE)
-        for shuffle in (true, false)
-            compression =
-                IS.CompressionSettings(;
-                    enabled = true,
-                    type = type,
-                    level = 5,
-                    shuffle = shuffle,
-                )
-            test_add_remove(
-                IS.make_time_series_storage(;
-                    in_memory = in_memory,
-                    compression = compression,
-                ),
-            )
-            test_get_subset(
-                IS.make_time_series_storage(;
-                    in_memory = in_memory,
-                    compression = compression,
-                ),
-            )
-            test_clear(
-                IS.make_time_series_storage(;
-                    in_memory = in_memory,
-                    compression = compression,
-                ),
-            )
-        end
-    end
+    test_add_remove(IS.make_time_series_storage(; in_memory = true))
+    test_get_subset(IS.make_time_series_storage(; in_memory = true))
+    test_clear(IS.make_time_series_storage(; in_memory = true))
 end
 
 @testset "Test isempty" begin
-    for in_memory in (true, false)
-        storage = IS.make_time_series_storage(; in_memory = in_memory)
-        @test isempty(storage)
-        name = "component1"
-        name = "val"
-        ts = IS.SingleTimeSeries(; data = create_time_array(), name = "test")
-        IS.serialize_time_series!(storage, ts)
-        @test !isempty(storage)
-    end
+    storage = IS.make_time_series_storage(; in_memory = true)
+    @test isempty(storage)
+    ts = IS.SingleTimeSeries(; data = create_time_array(), name = "test")
+    IS.serialize_time_series!(storage, ts)
+    @test !isempty(storage)
 end
