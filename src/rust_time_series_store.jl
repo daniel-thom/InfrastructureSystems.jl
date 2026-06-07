@@ -1,79 +1,26 @@
-# Rust-backed time series storage (proof-of-concept).
+# Rust-backed time series storage.
 #
 # `RustTimeSeriesStore` delegates BOTH array data and metadata to the external
-# `time-series-store` Rust engine through its C ABI. Unlike the legacy split
-# between `Hdf5TimeSeriesStorage` (arrays) and `TimeSeriesMetadataStore`
-# (SQLite), the Rust store owns both: arrays land in a NetCDF4 `.nc` file
-# (content-addressed by SHA-256 hash) and metadata in a sibling `.sqlite` file.
+# `time-series-store` Rust engine, via the `TimeSeriesStore.jl` binding package.
+# The Rust store owns both: arrays land in a NetCDF4 `.nc` file (content-addressed
+# by SHA-256 hash) and metadata in a sibling `.sqlite` file. Time series *data*
+# identity is the array content hash, not a UUID. Persisting a system writes the
+# `.nc` + `.sqlite` pair directly; no HDF5 is involved.
 #
-# Time series *data* identity is the array content hash, NOT a UUID. Persisting
-# a system writes the `.nc` + `.sqlite` pair directly; the metadata SQLite is
-# never embedded in an HDF5 file.
-#
-# The cdylib is located via the `TIME_SERIES_STORE_LIB` environment variable.
-# This module deliberately avoids the registered `TimeSeries` package name and
-# makes raw `ccall`s so it has no dependency on the standalone `TimeSeries.jl`
-# binding.
+# This file holds the IS-specific glue (owner/feature conversion, window
+# flatten/reshape, manager routing). All low-level FFI lives in `TimeSeriesStore`.
 
-# ---- cdylib resolution ----------------------------------------------------
+const TSS = TimeSeriesStore
 
-const _RUST_TS_LIB = Ref{String}("")
-
-function rust_ts_lib_path()
-    if !isempty(_RUST_TS_LIB[])
-        return _RUST_TS_LIB[]
-    end
-    p = get(ENV, "TIME_SERIES_STORE_LIB", "")
-    isempty(p) && error(
-        "TIME_SERIES_STORE_LIB env var must point to " *
-        "libtime_series_store_ffi.{dylib,so,dll}",
-    )
-    _RUST_TS_LIB[] = p
-    return p
-end
-
-# ---- Status codes (must match crates/time-series-store-ffi/src/lib.rs) -----
-
-const RTS_OK = Int32(0)
-const RTS_ERR_NOT_FOUND = Int32(4)
-
-struct RustTimeSeriesNotFound <: Exception
-    msg::String
-end
-
-function _rts_last_error_message()
-    needed = Ref{UInt64}(0)
-    ccall((:ts_last_error_message, rust_ts_lib_path()), Int32,
-        (Ptr{UInt8}, UInt64, Ptr{UInt64}), C_NULL, UInt64(0), needed)
-    n = Int(needed[])
-    n == 0 && return ""
-    buf = Vector{UInt8}(undef, n + 1)
-    ccall((:ts_last_error_message, rust_ts_lib_path()), Int32,
-        (Ptr{UInt8}, UInt64, Ptr{UInt64}), buf, UInt64(n + 1), C_NULL)
-    return String(buf[1:n])
-end
-
-function _rts_check(code::Int32)
-    code == RTS_OK && return
-    msg = _rts_last_error_message()
-    if code == RTS_ERR_NOT_FOUND
-        throw(RustTimeSeriesNotFound(msg))
-    end
-    error("time-series-store error ($code): $msg")
-end
+# Not-found is raised by the binding; alias keeps the IS-facing name + tests stable.
+const RustTimeSeriesNotFound = TimeSeriesStore.NotFoundError
 
 # ---- Store -----------------------------------------------------------------
 
 mutable struct RustTimeSeriesStore <: TimeSeriesStorage
-    handle::Ptr{Cvoid}
+    inner::TSS.Store
     "Filesystem base path for the `.nc` / `.sqlite` pair (nothing if in-memory)."
     path::Union{Nothing, String}
-
-    function RustTimeSeriesStore(handle::Ptr{Cvoid}, path)
-        s = new(handle, path)
-        finalizer(close!, s)
-        return s
-    end
 end
 
 """
@@ -83,12 +30,9 @@ Create a Rust-backed time series store. When `in_memory=false`, `path` is the
 base path for the on-disk artifacts (`<path>.nc` and `<path>.sqlite`).
 """
 function RustTimeSeriesStore(; in_memory::Bool = false, path = nothing)
-    out = Ref{Ptr{Cvoid}}(C_NULL)
-    cpath = path === nothing ? C_NULL : String(path)
-    code = ccall((:ts_store_create, rust_ts_lib_path()), Int32,
-        (Cstring, Bool, Ref{Ptr{Cvoid}}), cpath, in_memory, out)
-    _rts_check(code)
-    return RustTimeSeriesStore(out[], path === nothing ? nothing : String(path))
+    store = in_memory ? TSS.Store(; in_memory = true) :
+            TSS.Store(; in_memory = false, path = path)
+    return RustTimeSeriesStore(store, path === nothing ? nothing : String(path))
 end
 
 """
@@ -97,53 +41,26 @@ end
 Open an existing on-disk Rust store from its `.nc` base path.
 """
 function open_rust_store(path::AbstractString; read_only::Bool = false)
-    out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_open, rust_ts_lib_path()), Int32,
-        (Cstring, Bool, Ref{Ptr{Cvoid}}), String(path), read_only, out)
-    _rts_check(code)
-    return RustTimeSeriesStore(out[], String(path))
+    return RustTimeSeriesStore(TSS.open_store(String(path); read_only = read_only), String(path))
 end
 
-function close!(store::RustTimeSeriesStore)
-    if store.handle != C_NULL
-        ccall((:ts_store_free, rust_ts_lib_path()), Cvoid, (Ptr{Cvoid},), store.handle)
-        store.handle = C_NULL
-    end
-    return
-end
+close!(store::RustTimeSeriesStore) = TSS.close!(store.inner)
 
 # ---- Conversions -----------------------------------------------------------
 
-function _rts_to_unix_ns(dt::Dates.DateTime)
-    ms = Int64(Dates.datetime2unix(dt) * 1000)
-    return ms * 1_000_000
-end
-
-function _rts_from_unix_ns(ns::Int64)
-    ms_total = div(ns, 1_000_000)
-    return Dates.unix2datetime(ms_total / 1000)
-end
-
-_rts_resolution_to_ns(p::Dates.Period) = Dates.toms(p) * 1_000_000
-
-_rts_owner_category_int(category::AbstractString) =
-    category == "Component" ? Int32(0) :
-    category == "SupplementalAttribute" ? Int32(1) :
+_tss_category(category::AbstractString) =
+    category == "Component" ? TSS.Component :
+    category == "SupplementalAttribute" ? TSS.SupplementalAttribute :
     error("unknown owner category $category")
 
-# Returns a String (held by the caller's local, so it stays GC-rooted across the
-# ccall) or C_NULL. The Rust side treats null / empty / whitespace as no features.
-_rts_features_json(features) = isempty(features) ? C_NULL : JSON3.write(features)
-
-# ---- Operations ------------------------------------------------------------
+# ---- Operations (thin delegations to TimeSeriesStore) ----------------------
 
 """
     serialize_single!(store, owner_uuid, owner_type, owner_category, name, sts;
                       features=Dict(), units=nothing, scaling_factor_multiplier=nothing)
 
-Add a `SingleTimeSeries` (data + metadata) to the Rust store. `owner_uuid` is
-the stringified UUID of the owning component / supplemental attribute. The array
-is content-addressed; identical arrays are de-duplicated automatically.
+Add a `SingleTimeSeries` (data + metadata) to the Rust store. The array is
+content-addressed; identical arrays are de-duplicated automatically.
 """
 function serialize_single!(
     store::RustTimeSeriesStore,
@@ -156,27 +73,14 @@ function serialize_single!(
     units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
-    initial_ns = _rts_to_unix_ns(get_initial_timestamp(sts))
-    resolution_ns = _rts_resolution_to_ns(get_resolution(sts))
-    data = Vector{Float64}(TimeSeries.values(get_data(sts)))
-    features_json = _rts_features_json(features)
-    units_ptr = units === nothing ? C_NULL : String(units)
-    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL :
-                  String(scaling_factor_multiplier)
-
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_add_single, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64,
-            Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        store.handle, owner_uuid, owner_type,
-        _rts_owner_category_int(owner_category), name,
-        initial_ns, resolution_ns, data, UInt64(length(data)),
-        features_json, units_ptr, scaling_ptr, out_key)
-    _rts_check(code)
-    # We don't retain the opaque key handle; attribute-based lookups are used.
-    if out_key[] != C_NULL
-        ccall((:ts_key_free, rust_ts_lib_path()), Cvoid, (Ptr{Cvoid},), out_key[])
-    end
+    tss_ts = TSS.SingleTimeSeries(
+        get_initial_timestamp(sts),
+        get_resolution(sts),
+        Vector{Float64}(TimeSeries.values(get_data(sts))),
+    )
+    TSS.add_time_series!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
+        name, tss_ts; features = features, units = units,
+        scaling_factor_multiplier = scaling_factor_multiplier)
     return
 end
 
@@ -184,61 +88,19 @@ end
     get_metadata(store, owner_uuid, name; resolution, features=Dict())
 
 Return `(; initial_timestamp, resolution, length, data_hash)` for a stored
-SingleTimeSeries. `data_hash` is the 32-byte content hash. Throws
-`RustTimeSeriesNotFound` if absent.
+SingleTimeSeries. Throws `RustTimeSeriesNotFound` if absent.
 """
-function get_metadata(
-    store::RustTimeSeriesStore,
-    owner_uuid::AbstractString,
-    name::AbstractString;
-    resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}(),
-)
-    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
-    features_json = _rts_features_json(features)
-    out_initial = Ref{Int64}(0)
-    out_resolution = Ref{Int64}(0)
-    out_length = Ref{UInt64}(0)
-    out_hash = Vector{UInt8}(undef, 32)
-    code = ccall((:ts_store_get_metadata, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring,
-            Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}),
-        store.handle, owner_uuid, name, resolution_ns, features_json,
-        out_initial, out_resolution, out_length, out_hash)
-    _rts_check(code)
-    res_ms = div(out_resolution[], 1_000_000)
-    return (
-        initial_timestamp = _rts_from_unix_ns(out_initial[]),
-        resolution = Dates.Millisecond(res_ms),
-        length = Int(out_length[]),
-        data_hash = out_hash,
-    )
-end
+get_metadata(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString;
+    resolution::Union{Nothing, Dates.Period} = nothing, features = Dict{String, Any}()) =
+    TSS.get_metadata(store.inner, owner_uuid, name; resolution = resolution, features = features)
 
-"""
-    get_array_by_hash(store, data_hash) -> Vector{Float64}
-"""
-function get_array_by_hash(store::RustTimeSeriesStore, data_hash::Vector{UInt8})
-    length(data_hash) == 32 || error("data_hash must be 32 bytes")
-    out_data = Ref{Ptr{Float64}}(C_NULL)
-    out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_get_array_by_hash, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, Ref{Ptr{Float64}}, Ref{UInt64}),
-        store.handle, data_hash, out_data, out_len)
-    _rts_check(code)
-    n = Int(out_len[])
-    raw = unsafe_wrap(Array, out_data[], n; own = false)
-    result = copy(raw)
-    ccall((:ts_buffer_free_f64, rust_ts_lib_path()), Cvoid,
-        (Ptr{Float64}, UInt64), out_data[], out_len[])
-    return result
-end
+get_array_by_hash(store::RustTimeSeriesStore, data_hash::Vector{UInt8}) =
+    TSS.get_array_by_hash(store.inner, data_hash)
 
 """
     get_single(store, owner_uuid, name; resolution, features=Dict()) -> SingleTimeSeries
 
-Reconstruct a `SingleTimeSeries` (metadata + array) from the Rust store. The
-timestamps are regenerated from `initial_timestamp + resolution*(i-1)`.
+Reconstruct a `SingleTimeSeries` (metadata + array) from the Rust store.
 """
 function get_single(
     store::RustTimeSeriesStore,
@@ -257,63 +119,23 @@ function get_single(
     )
 end
 
-function has_time_series(
-    store::RustTimeSeriesStore,
-    owner_uuid::AbstractString,
-    name::AbstractString;
-    resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}(),
-)
-    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
-    features_json = _rts_features_json(features)
-    out = Ref{Bool}(false)
-    code = ccall((:ts_store_has_by_attrs, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring, Ref{Bool}),
-        store.handle, owner_uuid, name, resolution_ns, features_json, out)
-    _rts_check(code)
-    return out[]
-end
+has_time_series(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString;
+    resolution::Union{Nothing, Dates.Period} = nothing, features = Dict{String, Any}()) =
+    TSS.has_time_series(store.inner, owner_uuid, name; resolution = resolution, features = features)
 
-function remove_single!(
-    store::RustTimeSeriesStore,
-    owner_uuid::AbstractString,
-    name::AbstractString;
-    resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}(),
-)
-    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
-    features_json = _rts_features_json(features)
-    code = ccall((:ts_store_remove_by_attrs, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring),
-        store.handle, owner_uuid, name, resolution_ns, features_json)
-    _rts_check(code)
-    return
-end
+remove_single!(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString;
+    resolution::Union{Nothing, Dates.Period} = nothing, features = Dict{String, Any}()) =
+    TSS.remove_time_series!(store.inner, owner_uuid, name;
+        resolution = resolution, features = features)
 
-function get_counts(store::RustTimeSeriesStore)
-    a = Ref{Int64}(0)
-    b = Ref{Int64}(0)
-    c = Ref{Int64}(0)
-    code = ccall((:ts_store_counts, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}), store.handle, a, b, c)
-    _rts_check(code)
-    return (
-        components_with_time_series = a[],
-        static_time_series = b[],
-        forecasts = c[],
-    )
-end
+get_counts(store::RustTimeSeriesStore) = TSS.get_counts(store.inner)
 
 function get_num_time_series(store::RustTimeSeriesStore)
     c = get_counts(store)
     return c.static_time_series + c.forecasts
 end
 
-function flush!(store::RustTimeSeriesStore)
-    code = ccall((:ts_store_flush, rust_ts_lib_path()), Int32, (Ptr{Cvoid},), store.handle)
-    _rts_check(code)
-    return
-end
+flush!(store::RustTimeSeriesStore) = TSS.flush!(store.inner)
 
 Base.isempty(store::RustTimeSeriesStore) = get_num_time_series(store) == 0
 
@@ -324,8 +146,7 @@ get_compression_settings(::RustTimeSeriesStore) = CompressionSettings(; enabled 
     serialize(store::RustTimeSeriesStore, file_path)
 
 Persist the store's two artifacts to `file_path` (the NetCDF arrays) and
-`file_path * ".sqlite"` (the metadata). No HDF5 bundle is produced and the
-SQLite database is never embedded in HDF5.
+`file_path * ".sqlite"` (the metadata). No HDF5 is produced.
 """
 function serialize(store::RustTimeSeriesStore, file_path::AbstractString)
     isnothing(store.path) && error(
@@ -339,12 +160,7 @@ function serialize(store::RustTimeSeriesStore, file_path::AbstractString)
 end
 
 """Remove all time series (data + metadata) from the store."""
-function clear_time_series!(store::RustTimeSeriesStore)
-    code = ccall((:ts_store_clear, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring), store.handle, C_NULL)
-    _rts_check(code)
-    return
-end
+clear_time_series!(store::RustTimeSeriesStore) = TSS.clear!(store.inner)
 
 # ---- TimeSeriesManager routing (SingleTimeSeries only) ---------------------
 
@@ -435,168 +251,62 @@ end
 
 # ---- Forecasts (Deterministic / DeterministicSingleTimeSeries) -------------
 
-const RTS_TYPE_DETERMINISTIC = Int32(2)
-const RTS_TYPE_DETERMINISTIC_SINGLE = Int32(3)
-const RTS_TYPE_PROBABILISTIC = Int32(4)
-const RTS_TYPE_SCENARIOS = Int32(5)
+const RTS_TYPE_DETERMINISTIC = TSS.TS_TYPE_DETERMINISTIC
+const RTS_TYPE_DETERMINISTIC_SINGLE = TSS.TS_TYPE_DETERMINISTIC_SINGLE
+const RTS_TYPE_PROBABILISTIC = TSS.TS_TYPE_PROBABILISTIC
+const RTS_TYPE_SCENARIOS = TSS.TS_TYPE_SCENARIOS
 
-"""Add a Probabilistic forecast: `flat_values` is the flattened 3-D storage array."""
 function add_probabilistic!(
-    store::RustTimeSeriesStore,
-    owner_uuid::AbstractString,
-    owner_type::AbstractString,
-    owner_category::AbstractString,
-    name::AbstractString,
-    initial_timestamp::Dates.DateTime,
-    resolution::Dates.Period,
-    horizon::Dates.Period,
-    interval::Dates.Period,
-    count::Integer,
-    percentiles::Vector{Float64},
-    flat_values::Vector{Float64};
-    features = Dict{String, Any}(),
-    units::Union{Nothing, AbstractString} = nothing,
+    store::RustTimeSeriesStore, owner_uuid::AbstractString, owner_type::AbstractString,
+    owner_category::AbstractString, name::AbstractString, initial_timestamp::Dates.DateTime,
+    resolution::Dates.Period, horizon::Dates.Period, interval::Dates.Period, count::Integer,
+    percentiles::Vector{Float64}, flat_values::Vector{Float64};
+    features = Dict{String, Any}(), units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
-    features_json = _rts_features_json(features)
-    units_ptr = units === nothing ? C_NULL : String(units)
-    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_add_probabilistic, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64, Int64, Int64, UInt64,
-            Ptr{Float64}, UInt64, Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        store.handle, owner_uuid, owner_type, _rts_owner_category_int(owner_category), name,
-        _rts_to_unix_ns(initial_timestamp), _rts_resolution_to_ns(resolution),
-        _rts_resolution_to_ns(horizon), _rts_resolution_to_ns(interval), UInt64(count),
-        percentiles, UInt64(length(percentiles)), flat_values, UInt64(length(flat_values)),
-        features_json, units_ptr, scaling_ptr, out_key)
-    _rts_check(code)
-    out_key[] != C_NULL &&
-        ccall((:ts_key_free, rust_ts_lib_path()), Cvoid, (Ptr{Cvoid},), out_key[])
+    TSS.add_probabilistic!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
+        name, initial_timestamp, resolution, horizon, interval, count, percentiles, flat_values;
+        features = features, units = units, scaling_factor_multiplier = scaling_factor_multiplier)
     return
 end
 
-"""Read Probabilistic metadata; named tuple also includes `percentiles`."""
-function get_probabilistic_metadata(
-    store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString;
-    resolution::Union{Nothing, Dates.Period} = nothing, features = Dict{String, Any}(),
-)
-    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
-    features_json = _rts_features_json(features)
-    oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
-    oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
-    op = Ref{Ptr{Float64}}(C_NULL); opl = Ref{UInt64}(0)
-    code = ccall((:ts_store_get_probabilistic_metadata, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring, Ref{Int64}, Ref{Int64}, Ref{Int64},
-            Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}, Ref{Ptr{Float64}}, Ref{UInt64}),
-        store.handle, owner_uuid, name, resolution_ns, features_json,
-        oi, orr, oh, ov, oc, ol, ohash, op, opl)
-    _rts_check(code)
-    np = Int(opl[])
-    percentiles = copy(unsafe_wrap(Array, op[], np; own = false))
-    ccall((:ts_buffer_free_f64, rust_ts_lib_path()), Cvoid, (Ptr{Float64}, UInt64), op[], opl[])
-    return (
-        initial_timestamp = _rts_from_unix_ns(oi[]),
-        resolution = Dates.Millisecond(div(orr[], 1_000_000)),
-        horizon = Dates.Millisecond(div(oh[], 1_000_000)),
-        interval = Dates.Millisecond(div(ov[], 1_000_000)),
-        count = Int(oc[]), length = Int(ol[]), data_hash = ohash, percentiles = percentiles,
-    )
-end
+get_probabilistic_metadata(store::RustTimeSeriesStore, owner_uuid::AbstractString,
+    name::AbstractString; resolution::Union{Nothing, Dates.Period} = nothing,
+    features = Dict{String, Any}()) =
+    TSS.get_probabilistic_metadata(store.inner, owner_uuid, name;
+        resolution = resolution, features = features)
 
-"""Add a forecast: `flat_values` is the flattened storage array."""
 function add_forecast!(
-    store::RustTimeSeriesStore,
-    owner_uuid::AbstractString,
-    owner_type::AbstractString,
-    owner_category::AbstractString,
-    name::AbstractString,
-    ts_type::Integer,
-    initial_timestamp::Dates.DateTime,
-    resolution::Dates.Period,
-    horizon::Dates.Period,
-    interval::Dates.Period,
-    count::Integer,
-    flat_values::Vector{Float64};
-    features = Dict{String, Any}(),
-    units::Union{Nothing, AbstractString} = nothing,
+    store::RustTimeSeriesStore, owner_uuid::AbstractString, owner_type::AbstractString,
+    owner_category::AbstractString, name::AbstractString, ts_type::Integer,
+    initial_timestamp::Dates.DateTime, resolution::Dates.Period, horizon::Dates.Period,
+    interval::Dates.Period, count::Integer, flat_values::Vector{Float64};
+    features = Dict{String, Any}(), units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
-    features_json = _rts_features_json(features)
-    units_ptr = units === nothing ? C_NULL : String(units)
-    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_add_forecast, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int32, Int64, Int64, Int64, Int64,
-            UInt64, Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        store.handle, owner_uuid, owner_type, _rts_owner_category_int(owner_category), name,
-        Int32(ts_type), _rts_to_unix_ns(initial_timestamp), _rts_resolution_to_ns(resolution),
-        _rts_resolution_to_ns(horizon), _rts_resolution_to_ns(interval), UInt64(count),
-        flat_values, UInt64(length(flat_values)), features_json, units_ptr, scaling_ptr, out_key)
-    _rts_check(code)
-    out_key[] != C_NULL &&
-        ccall((:ts_key_free, rust_ts_lib_path()), Cvoid, (Ptr{Cvoid},), out_key[])
+    TSS.add_forecast!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
+        name, ts_type, initial_timestamp, resolution, horizon, interval, count, flat_values;
+        features = features, units = units, scaling_factor_multiplier = scaling_factor_multiplier)
     return
 end
 
-"""Read forecast metadata; returns a named tuple incl `horizon`, `interval`, `count`."""
-function get_forecast_metadata(
-    store::RustTimeSeriesStore,
-    owner_uuid::AbstractString,
-    name::AbstractString,
-    ts_type::Integer;
-    resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}(),
-)
-    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
-    features_json = _rts_features_json(features)
-    oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
-    oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
-    code = ccall((:ts_store_get_forecast_metadata, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring,
-            Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}),
-        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json,
-        oi, orr, oh, ov, oc, ol, ohash)
-    _rts_check(code)
-    return (
-        initial_timestamp = _rts_from_unix_ns(oi[]),
-        resolution = Dates.Millisecond(div(orr[], 1_000_000)),
-        horizon = Dates.Millisecond(div(oh[], 1_000_000)),
-        interval = Dates.Millisecond(div(ov[], 1_000_000)),
-        count = Int(oc[]),
-        length = Int(ol[]),
-        data_hash = ohash,
-    )
-end
+get_forecast_metadata(store::RustTimeSeriesStore, owner_uuid::AbstractString,
+    name::AbstractString, ts_type::Integer; resolution::Union{Nothing, Dates.Period} = nothing,
+    features = Dict{String, Any}()) =
+    TSS.get_forecast_metadata(store.inner, owner_uuid, name, ts_type;
+        resolution = resolution, features = features)
 
-function has_typed(
-    store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString,
+has_typed(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString,
     ts_type::Integer; resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}(),
-)
-    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
-    features_json = _rts_features_json(features)
-    out = Ref{Bool}(false)
-    code = ccall((:ts_store_has_typed, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring, Ref{Bool}),
-        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json, out)
-    _rts_check(code)
-    return out[]
-end
+    features = Dict{String, Any}()) =
+    TSS.has_typed(store.inner, owner_uuid, name, ts_type;
+        resolution = resolution, features = features)
 
-function remove_typed!(
-    store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString,
+remove_typed!(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString,
     ts_type::Integer; resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}(),
-)
-    resolution_ns = resolution === nothing ? Int64(0) : _rts_resolution_to_ns(resolution)
-    features_json = _rts_features_json(features)
-    code = ccall((:ts_store_remove_typed, rust_ts_lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring),
-        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json)
-    _rts_check(code)
-    return
-end
+    features = Dict{String, Any}()) =
+    TSS.remove_typed!(store.inner, owner_uuid, name, ts_type;
+        resolution = resolution, features = features)
 
 # Flatten a Deterministic's SortedDict windows column-major: [w1; w2; ...].
 function _flatten_deterministic(ts::Deterministic)

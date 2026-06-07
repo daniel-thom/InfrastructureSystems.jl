@@ -22,6 +22,7 @@ import StringTemplates
 import StructTypes
 import TerminalLoggers: TerminalLogger, ProgressLevel
 import TimeSeries
+import TimeSeriesStore
 import TimerOutputs
 import TOML
 using DataStructures: OrderedDict, SortedDict
