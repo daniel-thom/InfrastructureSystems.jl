@@ -44,8 +44,27 @@ function create_system_data(;
     return data
 end
 
-function create_system_data_shared_time_series(; time_series_in_memory = false)
-    data = IS.SystemData(; time_series_in_memory = time_series_in_memory)
+# True if the Rust time series backend (the cdylib / TimeSeriesStore_jll) is
+# available, so on-disk serialization tests can run. Set TIME_SERIES_STORE_LIB
+# for a development cdylib.
+function rust_ts_available()
+    try
+        store = IS.RustTimeSeriesStore(; in_memory = true)
+        IS.close!(store)
+        return true
+    catch
+        return false
+    end
+end
+
+function create_system_data_shared_time_series(;
+    time_series_in_memory = false,
+    time_series_backend = :legacy,
+)
+    data = IS.SystemData(;
+        time_series_in_memory = time_series_in_memory,
+        time_series_backend = time_series_backend,
+    )
 
     name1 = "Component1"
     name2 = "Component2"

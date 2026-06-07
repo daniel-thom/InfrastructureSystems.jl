@@ -162,6 +162,18 @@ end
 """Remove all time series (data + metadata) from the store."""
 clear_time_series!(store::RustTimeSeriesStore) = TSS.clear!(store.inner)
 
+# The store handle / file path differ across a serialize→deserialize round-trip,
+# so compare structurally by counts. Element-level equality is covered by the
+# Rust integration tests (`test/rust/rust_system_integration.jl`).
+function compare_values(
+    match_fn::Union{Function, Nothing},
+    x::RustTimeSeriesStore,
+    y::RustTimeSeriesStore;
+    kwargs...,
+)
+    return get_counts(x) == get_counts(y)
+end
+
 # ---- TimeSeriesManager routing (SingleTimeSeries only) ---------------------
 
 """

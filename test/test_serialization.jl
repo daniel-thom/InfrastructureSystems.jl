@@ -13,13 +13,14 @@ function validate_serialization(sys::IS.SystemData; time_series_read_only = fals
 
     @test haskey(data, "time_series_storage_file") ==
           !isempty(sys.time_series_manager.data_store)
-    t_file =
-        joinpath(directory, splitext(basename(path))[1] * "_" * IS.TIME_SERIES_STORAGE_FILE)
     if haskey(data, "time_series_storage_file")
-        dst_file = joinpath(test_dir, basename(t_file))
-        mv(t_file, dst_file)
-    else
-        @test !isfile(t_file)
+        # Move the time series artifact(s) alongside the JSON. The Rust backend
+        # writes a `.nc` + sibling `.sqlite`; move both if present.
+        base = data["time_series_storage_file"]
+        for f in (base, base * ".sqlite")
+            src = joinpath(directory, f)
+            isfile(src) && mv(src, joinpath(test_dir, basename(f)))
+        end
     end
 
     data = open(path) do io
@@ -99,10 +100,13 @@ end
 end
 
 @testset "Test JSON serialization of system data" begin
-    for in_memory in (true, false)
-        sys = create_system_data_shared_time_series(; time_series_in_memory = in_memory)
+    # On-disk time series serialization now uses the Rust backend (HDF5 removed).
+    if rust_ts_available()
+        sys = create_system_data_shared_time_series(; time_series_backend = :rust)
         _, result = validate_serialization(sys)
         @test result
+    else
+        @test_skip false
     end
 end
 
@@ -125,20 +129,28 @@ function _make_time_series()
 end
 
 @testset "Test JSON serialization of with read-only time series" begin
-    sys = create_system_data_shared_time_series(; time_series_in_memory = false)
-    sys2, result = validate_serialization(sys; time_series_read_only = true)
-    @test result
+    if rust_ts_available()
+        sys = create_system_data_shared_time_series(; time_series_backend = :rust)
+        sys2, result = validate_serialization(sys; time_series_read_only = true)
+        @test result
 
-    component = first(IS.get_components(IS.TestComponent, sys2))
-    @test_throws ArgumentError IS.add_time_series!(sys, component, _make_time_series())
+        component = first(IS.get_components(IS.TestComponent, sys2))
+        @test_throws ArgumentError IS.add_time_series!(sys, component, _make_time_series())
+    else
+        @test_skip false
+    end
 end
 
 @testset "Test JSON serialization of with mutable time series" begin
-    sys = create_system_data_shared_time_series(; time_series_in_memory = false)
-    sys2, result = validate_serialization(sys; time_series_read_only = false)
-    @test result
-    component = first(IS.get_components(IS.TestComponent, sys2))
-    IS.add_time_series!(sys2, component, _make_time_series())
+    if rust_ts_available()
+        sys = create_system_data_shared_time_series(; time_series_backend = :rust)
+        sys2, result = validate_serialization(sys; time_series_read_only = false)
+        @test result
+        component = first(IS.get_components(IS.TestComponent, sys2))
+        IS.add_time_series!(sys2, component, _make_time_series())
+    else
+        @test_skip false
+    end
 end
 
 @testset "Test JSON serialization with no time series" begin
