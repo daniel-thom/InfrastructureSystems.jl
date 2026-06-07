@@ -20,24 +20,53 @@ function TimeSeriesManager(;
     read_only = false,
     directory = nothing,
     compression = CompressionSettings(),
+    backend = :legacy,
 )
     if isnothing(directory) && haskey(ENV, TIME_SERIES_DIRECTORY_ENV_VAR)
         directory = ENV[TIME_SERIES_DIRECTORY_ENV_VAR]
     end
 
     if isnothing(metadata_store)
+        # With the Rust backend, ts-store owns both data and metadata; this
+        # store is kept (empty) only to satisfy the field type.
         metadata_store = TimeSeriesMetadataStore()
     end
 
     if isnothing(data_store)
-        data_store = make_time_series_storage(;
-            in_memory = in_memory,
-            directory = directory,
-            compression = compression,
-        )
+        if backend == :rust
+            # The Rust store unifies data + metadata. On-disk artifacts live at
+            # `<dir>/<uuid>_time_series.nc` (+ sidecar `.sqlite`).
+            path = if in_memory
+                nothing
+            else
+                dir = isnothing(directory) ? tempdir() : directory
+                joinpath(dir, string(UUIDs.uuid4()) * "_time_series.nc")
+            end
+            data_store = RustTimeSeriesStore(; in_memory = in_memory, path = path)
+        else
+            data_store = make_time_series_storage(;
+                in_memory = in_memory,
+                directory = directory,
+                compression = compression,
+            )
+        end
     end
     return TimeSeriesManager(data_store, metadata_store, read_only, nothing)
 end
+
+"""Whether this manager delegates data + metadata to the Rust `time-series-store`."""
+_uses_rust_store(mgr::TimeSeriesManager) = mgr.data_store isa RustTimeSeriesStore
+
+# (owner_uuid::String, owner_type::String, owner_category::String) for the Rust FFI.
+function _rust_owner_args(owner::TimeSeriesOwners)
+    return (
+        string(get_uuid(owner)),
+        string(nameof(typeof(owner))),
+        _get_owner_category(owner),
+    )
+end
+
+_rust_features(features) = Dict{String, Any}(string(k) => v for (k, v) in features)
 
 _get_forecast_params(ts::Forecast) = make_time_series_parameters(ts)
 _get_forecast_params(::StaticTimeSeries) = nothing
@@ -139,6 +168,9 @@ function add_time_series!(
     features...,
 )
     _throw_if_read_only(mgr)
+    if _uses_rust_store(mgr)
+        return _rust_add_time_series!(mgr, owner, time_series; features...)
+    end
     forecast_params = _get_forecast_params!(mgr, time_series)
     sts_params = StaticTimeSeriesParameters()
     throw_if_does_not_support_time_series(owner)
@@ -175,6 +207,10 @@ end
 
 function clear_time_series!(mgr::TimeSeriesManager)
     _throw_if_read_only(mgr)
+    if _uses_rust_store(mgr)
+        clear_time_series!(mgr.data_store)
+        return
+    end
     clear_metadata!(mgr.metadata_store)
     clear_time_series!(mgr.data_store)
 end
@@ -238,6 +274,14 @@ function remove_time_series!(
     features...,
 )
     _throw_if_read_only(mgr)
+    if _uses_rust_store(mgr)
+        time_series_type <: SingleTimeSeries ||
+            error("Rust backend supports only SingleTimeSeries (got $time_series_type)")
+        owner_uuid, _, _ = _rust_owner_args(owner)
+        remove_single!(mgr.data_store, owner_uuid, name;
+            resolution = resolution, features = _rust_features(features))
+        return
+    end
     uuids = list_matching_time_series_uuids(
         mgr.metadata_store;
         time_series_type = time_series_type,

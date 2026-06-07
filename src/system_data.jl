@@ -1,5 +1,7 @@
 
 const TIME_SERIES_STORAGE_FILE = "time_series_storage.h5"
+# Rust backend: NetCDF arrays; metadata lives beside it as `<file>.sqlite`.
+const RUST_TIME_SERIES_STORAGE_FILE = "time_series_storage.nc"
 const TIME_SERIES_DIRECTORY_ENV_VAR = "SIENNA_TIME_SERIES_DIRECTORY"
 const VALIDATION_DESCRIPTOR_FILE = "validation_descriptors.json"
 const SERIALIZATION_METADATA_KEY = "__serialization_metadata__"
@@ -49,6 +51,7 @@ function SystemData(;
     time_series_in_memory = false,
     time_series_directory = nothing,
     compression = CompressionSettings(),
+    time_series_backend = :legacy,
 )
     validation_descriptors = if isnothing(validation_descriptor_file)
         []
@@ -60,6 +63,7 @@ function SystemData(;
         in_memory = time_series_in_memory,
         directory = time_series_directory,
         compression = compression,
+        backend = time_series_backend,
     )
     components = Components(time_series_mgr, validation_descriptors)
     supplemental_attribute_mgr = SupplementalAttributeManager()
@@ -965,6 +969,15 @@ function serialize(data::SystemData)
                     get_compression_settings(data.time_series_manager.data_store).enabled
                 json_data["time_series_in_memory"] =
                     data.time_series_manager.data_store isa InMemoryTimeSeriesStorage
+            elseif _uses_rust_store(data.time_series_manager)
+                # Rust backend: write the .nc arrays + standalone .sqlite metadata
+                # (no HDF5, no embedded SQLite blob).
+                time_series_base_name =
+                    _get_secondary_basename(base, RUST_TIME_SERIES_STORAGE_FILE)
+                time_series_storage_file = joinpath(directory, time_series_base_name)
+                serialize(data.time_series_manager.data_store, time_series_storage_file)
+                json_data["time_series_storage_file"] = time_series_base_name
+                json_data["time_series_storage_type"] = "RustTimeSeriesStore"
             else
                 time_series_base_name =
                     _get_secondary_basename(base, TIME_SERIES_STORAGE_FILE)
@@ -995,7 +1008,17 @@ function deserialize(
 )
     @debug "deserialize" raw _group = LOG_GROUP_SERIALIZATION
 
-    if haskey(raw, "time_series_storage_file")
+    if haskey(raw, "time_series_storage_file") &&
+       strip_module_name(get(raw, "time_series_storage_type", "")) == "RustTimeSeriesStore"
+        if !isfile(raw["time_series_storage_file"])
+            error("time series file $(raw["time_series_storage_file"]) does not exist")
+        end
+        # Rust backend: open the .nc + sidecar .sqlite directly (no HDF5).
+        time_series_storage =
+            open_rust_store(raw["time_series_storage_file"];
+                read_only = time_series_read_only)
+        time_series_metadata_store = nothing
+    elseif haskey(raw, "time_series_storage_file")
         if !isfile(raw["time_series_storage_file"])
             error("time series file $(raw["time_series_storage_file"]) does not exist")
         end
@@ -1404,8 +1427,19 @@ get_num_components_with_supplemental_attributes(data::SystemData) =
 
 get_num_time_series(data::SystemData) =
     get_num_time_series(data.time_series_manager.metadata_store)
-get_time_series_counts(data::SystemData) =
-    get_time_series_counts(data.time_series_manager.metadata_store)
+function get_time_series_counts(data::SystemData)
+    mgr = data.time_series_manager
+    if _uses_rust_store(mgr)
+        c = get_counts(mgr.data_store)
+        return TimeSeriesCounts(;
+            components_with_time_series = c.components_with_time_series,
+            supplemental_attributes_with_time_series = 0,
+            static_time_series_count = c.static_time_series,
+            forecast_count = c.forecasts,
+        )
+    end
+    return get_time_series_counts(mgr.metadata_store)
+end
 get_time_series_counts_by_type(data::SystemData) =
     get_time_series_counts_by_type(data.time_series_manager.metadata_store)
 get_static_time_series_summary_table(data::SystemData) =

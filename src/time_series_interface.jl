@@ -68,6 +68,13 @@ function get_time_series(
     features...,
 ) where {T <: TimeSeriesData}
     TimerOutputs.@timeit_debug SYSTEM_TIMERS "get_time_series" begin
+        mgr = get_time_series_manager(owner)
+        if !isnothing(mgr) && _uses_rust_store(mgr)
+            return _rust_get_time_series(
+                T, owner, name;
+                start_time = start_time, len = len, resolution = resolution, features...,
+            )
+        end
         ts_metadata =
             get_time_series_metadata(
                 T,
@@ -991,6 +998,10 @@ function has_time_series(
 ) where {T <: TimeSeriesData}
     mgr = get_time_series_manager(val)
     isnothing(mgr) && return false
+    if _uses_rust_store(mgr)
+        T <: SingleTimeSeries || return false
+        return _rust_has_time_series(val, name; resolution = resolution, features...)
+    end
     return has_metadata(
         mgr.metadata_store,
         val;
