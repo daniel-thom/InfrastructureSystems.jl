@@ -575,7 +575,10 @@ end
 @testset "Test bulk add of time series" begin
     for in_memory in (false, true)
         sys = IS.SystemData(; time_series_in_memory = in_memory)
-        @test IS.stores_time_series_in_memory(sys) == in_memory
+        # Without HDF5, the only non-Rust backend is in-memory, so the
+        # `time_series_in_memory` flag no longer selects on-disk storage; on-disk
+        # persistence is `time_series_backend = :rust`.
+        @test IS.stores_time_series_in_memory(sys)
         initial_time = Dates.DateTime("2020-09-01")
         resolution = Dates.Hour(1)
         len = 24
