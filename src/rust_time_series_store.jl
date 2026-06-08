@@ -73,10 +73,14 @@ function serialize_single!(
     units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
+    # Preserve the value element type (Float64, Int64, …) so the Rust store
+    # records the correct dtype; the logical-type tag is `string(eltype)`.
+    values = TimeSeries.values(get_data(sts))
     tss_ts = TSS.SingleTimeSeries(
         get_initial_timestamp(sts),
         get_resolution(sts),
-        Vector{Float64}(TimeSeries.values(get_data(sts))),
+        values,
+        string(eltype(values)),
     )
     TSS.add_time_series!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
         name, tss_ts; features = features, units = units,
@@ -94,8 +98,8 @@ get_metadata(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::Abstr
     resolution::Union{Nothing, Dates.Period} = nothing, features = Dict{String, Any}()) =
     TSS.get_metadata(store.inner, owner_uuid, name; resolution = resolution, features = features)
 
-get_array_by_hash(store::RustTimeSeriesStore, data_hash::Vector{UInt8}) =
-    TSS.get_array_by_hash(store.inner, data_hash)
+get_array_by_hash(store::RustTimeSeriesStore, data_hash::Vector{UInt8}, ::Type{T} = Float64) where {T} =
+    TSS.get_array_by_hash(store.inner, data_hash, T)
 
 """
     get_single(store, owner_uuid, name; resolution, features=Dict()) -> SingleTimeSeries
@@ -110,7 +114,8 @@ function get_single(
     features = Dict{String, Any}(),
 )
     meta = get_metadata(store, owner_uuid, name; resolution = resolution, features = features)
-    values = get_array_by_hash(store, meta.data_hash)
+    # Reconstruct with the stored element type (meta.dtype is a Julia type).
+    values = get_array_by_hash(store, meta.data_hash, meta.dtype)
     timestamps = range(meta.initial_timestamp; length = meta.length, step = meta.resolution)
     return SingleTimeSeries(;
         name = String(name),
