@@ -96,3 +96,34 @@ end
         end
     end
 end
+
+@testset "dtype + FunctionData element types through the Rust backend" begin
+    initial = Dates.DateTime("2024-01-01")
+    res = Dates.Hour(1)
+    stamps = collect(range(initial; length = 3, step = res))
+
+    sys = IS.SystemData(; time_series_backend = :rust)
+    c = IS.TestComponent("c", 1)
+    IS.add_component!(sys, c)
+
+    # Int64 scalar series round-trips with its element type.
+    IS.add_time_series!(sys, c,
+        IS.SingleTimeSeries(; name = "ints", data = TimeSeries.TimeArray(stamps, Int64[10, 20, 30])))
+    ints = IS.get_time_series(IS.SingleTimeSeries, c, "ints")
+    @test eltype(TimeSeries.values(IS.get_data(ints))) == Int64
+    @test TimeSeries.values(IS.get_data(ints)) == Int64[10, 20, 30]
+
+    # QuadraticFunctionData (3-tuple) round-trips, non-parametric get.
+    qvals = [IS.QuadraticFunctionData(1.0 + i, 2.0 + i, 3.0 + i) for i in 1:3]
+    IS.add_time_series!(sys, c,
+        IS.SingleTimeSeries(; name = "quad", data = TimeSeries.TimeArray(stamps, qvals)))
+    quad = IS.get_time_series(IS.SingleTimeSeries, c, "quad")
+    @test TimeSeries.values(IS.get_data(quad)) == qvals
+
+    # LinearFunctionData (2-tuple), parametric get.
+    lvals = [IS.LinearFunctionData(10.0 + i, 20.0 + i) for i in 1:3]
+    IS.add_time_series!(sys, c,
+        IS.SingleTimeSeries(; name = "lin", data = TimeSeries.TimeArray(stamps, lvals)))
+    lin = IS.get_time_series(IS.SingleTimeSeries{IS.LinearFunctionData}, c, "lin")
+    @test TimeSeries.values(IS.get_data(lin)) == lvals
+end

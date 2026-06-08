@@ -53,6 +53,54 @@ _tss_category(category::AbstractString) =
     category == "SupplementalAttribute" ? TSS.SupplementalAttribute :
     error("unknown owner category $category")
 
+# ---- Element encoding ------------------------------------------------------
+# Scalars store as a 1-D array tagged with their type name. Fixed-size
+# FunctionData tuples store as a `(length, k)` Float64 array; reconstruction keys
+# on the `logical_type` tag returned by `get_metadata`.
+
+_storage_array(v::AbstractVector{<:Real}) = (collect(v), string(eltype(v)))
+
+function _storage_array(v::AbstractVector{LinearFunctionData})
+    mat = Matrix{Float64}(undef, length(v), 2)
+    for (i, fd) in enumerate(v)
+        mat[i, 1] = get_proportional_term(fd)
+        mat[i, 2] = get_constant_term(fd)
+    end
+    return (mat, "LinearFunctionData")
+end
+
+function _storage_array(v::AbstractVector{QuadraticFunctionData})
+    mat = Matrix{Float64}(undef, length(v), 3)
+    for (i, fd) in enumerate(v)
+        mat[i, 1] = get_quadratic_term(fd)
+        mat[i, 2] = get_proportional_term(fd)
+        mat[i, 3] = get_constant_term(fd)
+    end
+    return (mat, "QuadraticFunctionData")
+end
+
+_storage_array(v::AbstractVector) =
+    error("Rust backend does not support time series element type $(eltype(v)) yet")
+
+# Reconstruct the full value vector from the stored array, keyed on logical_type.
+function _read_values(
+    store::RustTimeSeriesStore,
+    hash::Vector{UInt8},
+    logical_type,
+    dtype,
+    len::Integer,
+)
+    if logical_type == "LinearFunctionData"
+        mat = TSS.get_array_nd(store.inner, hash, Float64, (len, 2))
+        return [LinearFunctionData(mat[i, 1], mat[i, 2]) for i in 1:len]
+    elseif logical_type == "QuadraticFunctionData"
+        mat = TSS.get_array_nd(store.inner, hash, Float64, (len, 3))
+        return [QuadraticFunctionData(mat[i, 1], mat[i, 2], mat[i, 3]) for i in 1:len]
+    else
+        return get_array_by_hash(store, hash, dtype)  # scalar
+    end
+end
+
 # ---- Operations (thin delegations to TimeSeriesStore) ----------------------
 
 """
@@ -73,14 +121,14 @@ function serialize_single!(
     units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
-    # Preserve the value element type (Float64, Int64, …) so the Rust store
-    # records the correct dtype; the logical-type tag is `string(eltype)`.
-    values = TimeSeries.values(get_data(sts))
+    # Encode the values: scalars stay 1-D; FunctionData becomes a (length, k)
+    # Float64 matrix. The logical-type tag drives reconstruction on read.
+    arr, logical = _storage_array(TimeSeries.values(get_data(sts)))
     tss_ts = TSS.SingleTimeSeries(
         get_initial_timestamp(sts),
         get_resolution(sts),
-        values,
-        string(eltype(values)),
+        arr,
+        logical,
     )
     TSS.add_time_series!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
         name, tss_ts; features = features, units = units,
@@ -114,8 +162,7 @@ function get_single(
     features = Dict{String, Any}(),
 )
     meta = get_metadata(store, owner_uuid, name; resolution = resolution, features = features)
-    # Reconstruct with the stored element type (meta.dtype is a Julia type).
-    values = get_array_by_hash(store, meta.data_hash, meta.dtype)
+    values = _read_values(store, meta.data_hash, meta.logical_type, meta.dtype, meta.length)
     timestamps = range(meta.initial_timestamp; length = meta.length, step = meta.resolution)
     return SingleTimeSeries(;
         name = String(name),
@@ -178,12 +225,6 @@ function compare_values(
 )
     return get_counts(x) == get_counts(y)
 end
-
-# Element type requested via `SingleTimeSeries{T}`; `nothing` for the unparametrized
-# `SingleTimeSeries`, in which case the caller falls back to the stored dtype.
-_rust_sts_eltype(::Type{SingleTimeSeries{E}}) where {E} = E
-_rust_sts_eltype(::Type{SingleTimeSeries}) = nothing
-_rust_sts_eltype(::Type{<:TimeSeriesData}) = nothing
 
 # ---- TimeSeriesManager routing (SingleTimeSeries only) ---------------------
 
@@ -254,9 +295,7 @@ function _rust_get_time_series(
     owner_uuid, _, _ = _rust_owner_args(owner)
     feats = _rust_features(features)
     meta = get_metadata(store, owner_uuid, name; resolution = resolution, features = feats)
-    # Honor a requested element type (`SingleTimeSeries{T}`); else use the stored dtype.
-    elT = something(_rust_sts_eltype(T), meta.dtype)
-    full = get_array_by_hash(store, meta.data_hash, elT)
+    full = _read_values(store, meta.data_hash, meta.logical_type, meta.dtype, meta.length)
 
     start = isnothing(start_time) ? meta.initial_timestamp : start_time
     index = compute_time_array_index(meta.initial_timestamp, start, meta.resolution)
