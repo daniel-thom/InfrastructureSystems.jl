@@ -152,15 +152,18 @@ function serialize_single!(
     # Encode the values: scalars stay 1-D; FunctionData becomes a (length, k)
     # Float64 matrix. The logical-type tag drives reconstruction on read.
     arr, logical = _storage_array(TimeSeries.values(get_data(sts)))
+    # `name` and `scaling_factor_multiplier` are carried on the binding struct
+    # (matching the InfrastructureSystems.jl object shape), not on add_time_series!.
     tss_ts = TSS.SingleTimeSeries(
         get_initial_timestamp(sts),
         get_resolution(sts),
         arr,
-        logical,
+        name;
+        scaling_factor_multiplier = scaling_factor_multiplier,
+        logical_type = logical,
     )
     TSS.add_time_series!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
-        name, tss_ts; features = features, units = units,
-        scaling_factor_multiplier = scaling_factor_multiplier)
+        tss_ts; features = features, units = units)
     return
 end
 
@@ -356,18 +359,19 @@ function add_probabilistic!(
     features = Dict{String, Any}(), units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
-    TSS.add_probabilistic!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
-        name, initial_timestamp, resolution, horizon, interval, count, percentiles, data;
-        features = features, units = units, scaling_factor_multiplier = scaling_factor_multiplier)
+    prob = TSS.Probabilistic(initial_timestamp, resolution, horizon, interval, count,
+        percentiles, data, name; scaling_factor_multiplier = scaling_factor_multiplier)
+    TSS.add_time_series!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
+        prob; features = features, units = units)
     return
 end
 
-get_probabilistic_metadata(store::RustTimeSeriesStore, owner_uuid::AbstractString,
-    name::AbstractString; resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}()) =
-    TSS.get_probabilistic_metadata(store.inner, owner_uuid, name;
-        resolution = resolution, features = features)
-
+"""
+Add a dense `Deterministic` (`ts_type = 2`) or `Scenarios` (`ts_type = 5`) forecast
+by building the matching `TimeSeriesStore` struct and routing through the generic
+`add_time_series!`. `DeterministicSingleTimeSeries` is not added here — it is
+derived from a stored `SingleTimeSeries` via `transform_single_time_series!`.
+"""
 function add_forecast!(
     store::RustTimeSeriesStore, owner_uuid::AbstractString, owner_type::AbstractString,
     owner_category::AbstractString, name::AbstractString, ts_type::Integer,
@@ -376,17 +380,20 @@ function add_forecast!(
     features = Dict{String, Any}(), units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
-    TSS.add_forecast!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
-        name, ts_type, initial_timestamp, resolution, horizon, interval, count, data;
-        features = features, units = units, scaling_factor_multiplier = scaling_factor_multiplier)
+    tss_ts = if ts_type == RTS_TYPE_DETERMINISTIC
+        TSS.Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
+            scaling_factor_multiplier = scaling_factor_multiplier)
+    elseif ts_type == RTS_TYPE_SCENARIOS
+        TSS.Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
+            scaling_factor_multiplier = scaling_factor_multiplier)
+    else
+        error("add_forecast! supports Deterministic ($RTS_TYPE_DETERMINISTIC) and " *
+              "Scenarios ($RTS_TYPE_SCENARIOS); got ts_type=$ts_type")
+    end
+    TSS.add_time_series!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
+        tss_ts; features = features, units = units)
     return
 end
-
-get_forecast_metadata(store::RustTimeSeriesStore, owner_uuid::AbstractString,
-    name::AbstractString, ts_type::Integer; resolution::Union{Nothing, Dates.Period} = nothing,
-    features = Dict{String, Any}()) =
-    TSS.get_forecast_metadata(store.inner, owner_uuid, name, ts_type;
-        resolution = resolution, features = features)
 
 has_typed(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::AbstractString,
     ts_type::Integer; resolution::Union{Nothing, Dates.Period} = nothing,
@@ -431,9 +438,24 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
         count = length(windows)
         ts_type = RTS_TYPE_DETERMINISTIC
     elseif ts isa DeterministicSingleTimeSeries
-        arr = Float64.(TimeSeries.values(get_data(get_single_time_series(ts))))
-        count = get_count(ts)
-        ts_type = RTS_TYPE_DETERMINISTIC_SINGLE
+        if has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC_SINGLE;
+            resolution = resolution, features = feats)
+            throw(ArgumentError("Time series data with duplicate attributes are already stored"))
+        end
+        # The Rust store derives a DeterministicSingleTimeSeries from a stored
+        # SingleTimeSeries (sharing the array) via transform_single_time_series!,
+        # rather than persisting a separate forecast array. Ensure the underlying
+        # series is present, then derive the DST.
+        underlying = get_single_time_series(ts)
+        has_time_series(store, owner_uuid, name; resolution = resolution, features = feats) ||
+            serialize_single!(store, owner_uuid, owner_type, owner_category, name, underlying;
+                features = feats)
+        TSS.transform_single_time_series!(store.inner, get_horizon(ts), interval)
+        return ForecastKey(;
+            time_series_type = typeof(ts), name = name,
+            initial_timestamp = get_initial_timestamp(ts), resolution = resolution,
+            horizon = get_horizon(ts), interval = interval, count = get_count(ts),
+            features = Dict{String, Any}(feats))
     elseif ts isa Scenarios
         arr = Float64.(get_array_for_hdf(ts))  # (scenario_count, horizon_count, count)
         count = get_count(ts)
@@ -466,55 +488,47 @@ function _rust_get_forecast(
 
     if has_typed(store, owner_uuid, name, RTS_TYPE_PROBABILISTIC;
         resolution = resolution, features = feats)
-        m = get_probabilistic_metadata(store, owner_uuid, name;
+        # `.data` is the canonical (percentile_count, horizon_count, count) array.
+        p = TSS.get_time_series(TSS.Probabilistic, store.inner, owner_uuid, name;
             resolution = resolution, features = feats)
-        percentile_count = length(m.percentiles)
-        horizon_count = Int(div(m.horizon, m.resolution))
-        arr = TSS.get_array_nd(store.inner, m.data_hash, Float64,
-            (percentile_count, horizon_count, m.count))
         data = SortedDict{Dates.DateTime, Matrix{Float64}}()
-        for i in 1:(m.count)
-            data[m.initial_timestamp + m.interval * (i - 1)] = permutedims(arr[:, :, i])
+        for i in 1:(p.count)
+            data[p.initial_timestamp + p.interval * (i - 1)] = permutedims(p.data[:, :, i])
         end
         return Probabilistic(; name = String(name), data = data,
-            percentiles = m.percentiles, resolution = m.resolution, interval = m.interval)
+            percentiles = p.percentiles, resolution = p.resolution, interval = p.interval)
     elseif has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC;
         resolution = resolution, features = feats)
-        m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC;
+        # `.data` is the canonical (horizon_count, count) array.
+        d = TSS.get_time_series(TSS.Deterministic, store.inner, owner_uuid, name;
             resolution = resolution, features = feats)
-        horizon_count = Int(div(m.horizon, m.resolution))
-        mat = TSS.get_array_nd(store.inner, m.data_hash, Float64, (horizon_count, m.count))
         data = SortedDict{Dates.DateTime, Vector{Float64}}()
-        for i in 1:(m.count)
-            data[m.initial_timestamp + m.interval * (i - 1)] = mat[:, i]
+        for i in 1:(d.count)
+            data[d.initial_timestamp + d.interval * (i - 1)] = d.data[:, i]
         end
         return Deterministic(; name = String(name), data = data,
-            resolution = m.resolution, interval = m.interval)
+            resolution = d.resolution, interval = d.interval)
     elseif has_typed(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC_SINGLE;
         resolution = resolution, features = feats)
-        m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC_SINGLE;
+        # A DST shares the underlying SingleTimeSeries array; rebuild that series
+        # and wrap it with the DST windowing parameters (read as a Deterministic).
+        d = TSS.get_time_series(TSS.DeterministicSingleTimeSeries, store.inner, owner_uuid, name;
             resolution = resolution, features = feats)
-        arr = get_array_by_hash(store, m.data_hash)
-        timestamps = range(m.initial_timestamp; length = length(arr), step = m.resolution)
-        sts = SingleTimeSeries(; name = String(name),
-            data = TimeSeries.TimeArray(collect(timestamps), arr), resolution = m.resolution)
+        sts = get_single(store, owner_uuid, name; resolution = resolution, features = feats)
         return DeterministicSingleTimeSeries(; single_time_series = sts,
-            initial_timestamp = m.initial_timestamp, interval = m.interval,
-            count = m.count, horizon = m.horizon)
+            initial_timestamp = d.initial_timestamp, interval = d.interval,
+            count = d.count, horizon = d.horizon)
     elseif has_typed(store, owner_uuid, name, RTS_TYPE_SCENARIOS;
         resolution = resolution, features = feats)
-        m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_SCENARIOS;
+        # `.data` is the canonical (scenario_count, horizon_count, count) array.
+        s = TSS.get_time_series(TSS.Scenarios, store.inner, owner_uuid, name;
             resolution = resolution, features = feats)
-        horizon_count = Int(div(m.horizon, m.resolution))
-        scenario_count = m.length  # native shape[0]
-        arr = TSS.get_array_nd(store.inner, m.data_hash, Float64,
-            (scenario_count, horizon_count, m.count))
         data = SortedDict{Dates.DateTime, Matrix{Float64}}()
-        for i in 1:(m.count)
-            data[m.initial_timestamp + m.interval * (i - 1)] = permutedims(arr[:, :, i])
+        for i in 1:(s.count)
+            data[s.initial_timestamp + s.interval * (i - 1)] = permutedims(s.data[:, :, i])
         end
-        return Scenarios(; name = String(name), data = data, scenario_count = scenario_count,
-            resolution = m.resolution, interval = m.interval)
+        return Scenarios(; name = String(name), data = data, scenario_count = s.scenario_count,
+            resolution = s.resolution, interval = s.interval)
     end
     throw(RustTimeSeriesNotFound("no forecast for owner=$owner_uuid name=$name"))
 end
