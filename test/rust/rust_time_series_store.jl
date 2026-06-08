@@ -126,4 +126,16 @@ end
         IS.SingleTimeSeries(; name = "lin", data = TimeSeries.TimeArray(stamps, lvals)))
     lin = IS.get_time_series(IS.SingleTimeSeries{IS.LinearFunctionData}, c, "lin")
     @test TimeSeries.values(IS.get_data(lin)) == lvals
+
+    # PiecewiseLinearData (ragged: 2, 3, 2 points) round-trips.
+    pwl = [
+        IS.PiecewiseLinearData([(0.0, 1.0), (2.0, 3.0)]),
+        IS.PiecewiseLinearData([(0.0, 1.0), (1.0, 2.0), (2.0, 4.0)]),
+        IS.PiecewiseLinearData([(0.0, 0.0), (5.0, 9.0)]),
+    ]
+    IS.add_time_series!(sys, c,
+        IS.SingleTimeSeries(; name = "pwl", data = TimeSeries.TimeArray(stamps, pwl)))
+    got_pwl = TimeSeries.values(IS.get_data(IS.get_time_series(IS.SingleTimeSeries, c, "pwl")))
+    @test eltype(got_pwl) == IS.PiecewiseLinearData
+    @test all(IS.get_points(got_pwl[i]) == IS.get_points(pwl[i]) for i in 1:3)
 end

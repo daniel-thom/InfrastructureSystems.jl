@@ -79,6 +79,24 @@ function _storage_array(v::AbstractVector{QuadraticFunctionData})
     return (mat, "QuadraticFunctionData")
 end
 
+# Ragged: each step has a variable number of (x, y) points. Store as a
+# `(len, 1 + 2*max_points)` matrix padded with zeros; column 1 of each row is the
+# point count, so `shape[0]` stays the timestep count.
+function _storage_array(v::AbstractVector{PiecewiseLinearData})
+    len = length(v)
+    max_n = maximum(length(get_points(fd)) for fd in v; init = 0)
+    mat = zeros(Float64, len, 1 + 2 * max_n)
+    for (i, fd) in enumerate(v)
+        pts = get_points(fd)
+        mat[i, 1] = length(pts)
+        for (j, p) in enumerate(pts)
+            mat[i, 2j] = p.x
+            mat[i, 2j + 1] = p.y
+        end
+    end
+    return (mat, "PiecewiseLinearData")
+end
+
 _storage_array(v::AbstractVector) =
     error("Rust backend does not support time series element type $(eltype(v)) yet")
 
@@ -96,6 +114,16 @@ function _read_values(
     elseif logical_type == "QuadraticFunctionData"
         mat = TSS.get_array_nd(store.inner, hash, Float64, (len, 3))
         return [QuadraticFunctionData(mat[i, 1], mat[i, 2], mat[i, 3]) for i in 1:len]
+    elseif logical_type == "PiecewiseLinearData"
+        flat = get_array_by_hash(store, hash, Float64)
+        k = div(length(flat), len)  # 1 + 2*max_points (derived from the array size)
+        mat = TSS.get_array_nd(store.inner, hash, Float64, (len, k))
+        out = Vector{PiecewiseLinearData}(undef, len)
+        for i in 1:len
+            n = Int(round(mat[i, 1]))
+            out[i] = PiecewiseLinearData([(mat[i, 2j], mat[i, 2j + 1]) for j in 1:n])
+        end
+        return out
     else
         return get_array_by_hash(store, hash, dtype)  # scalar
     end
