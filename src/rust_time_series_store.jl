@@ -553,3 +553,25 @@ function _rust_has_time_series(
     end
     return false
 end
+
+# Name-less existence queries. `_rust_query_codes(T)` maps a query type to the
+# stored TimeSeriesType codes to match (empty tuple = any type).
+_rust_query_codes(::Type{<:SingleTimeSeries}) = (TSS.TS_TYPE_SINGLE,)
+_rust_query_codes(::Type{<:DeterministicSingleTimeSeries}) = (RTS_TYPE_DETERMINISTIC_SINGLE,)
+_rust_query_codes(::Type{<:AbstractDeterministic}) =
+    (RTS_TYPE_DETERMINISTIC, RTS_TYPE_DETERMINISTIC_SINGLE)
+_rust_query_codes(::Type{<:Probabilistic}) = (RTS_TYPE_PROBABILISTIC,)
+_rust_query_codes(::Type{<:Scenarios}) = (RTS_TYPE_SCENARIOS,)
+_rust_query_codes(::Type{<:Forecast}) = (RTS_TYPE_DETERMINISTIC,
+    RTS_TYPE_DETERMINISTIC_SINGLE, RTS_TYPE_PROBABILISTIC, RTS_TYPE_SCENARIOS)
+_rust_query_codes(::Type{<:TimeSeriesData}) = ()
+
+# True iff `owner` has any time series, optionally restricted to type `T`.
+function _rust_has_any(owner; time_series_type::Union{Nothing, Type} = nothing)
+    mgr = get_time_series_manager(owner)
+    store = mgr.data_store::RustTimeSeriesStore
+    owner_uuid, _, _ = _rust_owner_args(owner)
+    codes = time_series_type === nothing ? () : _rust_query_codes(time_series_type)
+    isempty(codes) && return TSS.has_for_owner(store.inner, owner_uuid)
+    return any(c -> TSS.has_for_owner(store.inner, owner_uuid; time_series_type = c), codes)
+end

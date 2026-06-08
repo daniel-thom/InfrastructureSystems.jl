@@ -223,10 +223,11 @@ end
     @test IS.get_compression_settings(IS.SystemData()) == none
     @test IS.get_compression_settings(IS.SystemData(; time_series_in_memory = true)) ==
           none
+    # Compression was an HDF5 feature; the in-memory backend (the only non-Rust
+    # backend after HDF5 removal) does not apply a requested compression setting.
     settings =
         IS.CompressionSettings(; enabled = true, type = IS.CompressionTypes.DEFLATE)
-    @test IS.get_compression_settings(IS.SystemData(; compression = settings)) ==
-          settings
+    @test IS.get_compression_settings(IS.SystemData(; compression = settings)) == none
 end
 
 @testset "Test single time series consistency" begin

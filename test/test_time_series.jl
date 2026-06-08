@@ -3172,12 +3172,18 @@ end
 end
 
 @testset "Test custom time series directory via env" begin
+    # The directory env var now places the Rust backend's `.nc` file (HDF5's file
+    # placement was removed); the in-memory backend has no on-disk file.
     @assert !haskey(ENV, IS.TIME_SERIES_DIRECTORY_ENV_VAR)
     path = mkpath("tmp-ts-dir")
     ENV[IS.TIME_SERIES_DIRECTORY_ENV_VAR] = path
     try
-        sys = IS.SystemData()
-        @test splitpath(sys.time_series_manager.data_store.file_path)[1] == path
+        if rust_ts_available()
+            sys = IS.SystemData(; time_series_backend = :rust)
+            @test splitpath(sys.time_series_manager.data_store.path)[1] == path
+        else
+            @test_skip false
+        end
     finally
         pop!(ENV, IS.TIME_SERIES_DIRECTORY_ENV_VAR)
     end
@@ -3188,23 +3194,6 @@ end
     counts = IS.get_time_series_counts(sys)
     @test counts.static_time_series_count == 1
     @test counts.components_with_time_series == 2
-end
-
-@testset "Test custom time series directories" begin
-    @test IS._get_time_series_parent_dir(nothing) == tempdir()
-    @test IS._get_time_series_parent_dir(pwd()) == pwd()
-    @test_throws ErrorException IS._get_time_series_parent_dir(
-        "/some/invalid/directory/",
-    )
-
-    ENV["SIENNA_TIME_SERIES_DIRECTORY"] = pwd()
-    try
-        @test IS._get_time_series_parent_dir() == pwd()
-        ENV["SIENNA_TIME_SERIES_DIRECTORY"] = "/some/invalid/directory/"
-        @test_throws ErrorException IS._get_time_series_parent_dir()
-    finally
-        pop!(ENV, "SIENNA_TIME_SERIES_DIRECTORY")
-    end
 end
 
 @testset "Test get_time_series_uuid" begin

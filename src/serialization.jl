@@ -117,7 +117,9 @@ function add_serialization_metadata!(data::Dict, ::Type{T}) where {T}
         TYPE_KEY => string(nameof(T)),
         MODULE_KEY => string(parentmodule(T)),
     )
-    if !isempty(T.parameters)
+    # A `UnionAll` (e.g. the parametric `SingleTimeSeries`) has no concrete
+    # parameters; name + module are enough to reconstruct it.
+    if !(T isa UnionAll) && !isempty(T.parameters)
         data[METADATA_KEY][PARAMETERS_KEY] = [string(nameof(x)) for x in T.parameters]
     end
 

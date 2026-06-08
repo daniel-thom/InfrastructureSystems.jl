@@ -116,7 +116,9 @@ function deserialize_time_series(
         else
             it = initial_time + (rows.start - 1) * resolution
         end
-        data[it] = @view ts_data[initial_time][rows]
+        # Slice along the time axis (dim 1), keeping any trailing dims so
+        # matrix-valued windows (Probabilistic / Scenarios) aren't linearized.
+        data[it] = selectdim(ts_data[initial_time], 1, rows)
     end
 
     if T <: AbstractDeterministic

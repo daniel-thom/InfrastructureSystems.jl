@@ -30,7 +30,8 @@ mutable struct TimeSeriesFileMetadata
     "Resolution of the data being parsed in seconds"
     resolution::Dates.Period
     percentiles::Vector{Float64}
-    time_series_type::DataType
+    # `Type` (not `DataType`) so the parametric `SingleTimeSeries` UnionAll fits.
+    time_series_type::Type
     "Calling module must set."
     component::Union{Nothing, InfrastructureSystemsComponent}
     "Applicable when data are scaling factors. Accessor function on component to apply to
@@ -302,14 +303,14 @@ end
 struct TimeSeriesParsingCache
     time_series_attributes::Vector{TimeSeriesParsedInfo}
     data_files::Dict{String, RawTimeSeries}
-    assignments::Dict{Base.UUID, Set{Tuple{DataType, DataType, String}}}
+    assignments::Dict{Base.UUID, Set{Tuple{Type, DataType, String}}}
 end
 
 function TimeSeriesParsingCache()
     return TimeSeriesParsingCache(
         Vector{TimeSeriesParsedInfo}(),
         Dict{String, Any}(),
-        Dict{Base.UUID, Set{Tuple{DataType, DataType, String}}}(),
+        Dict{Base.UUID, Set{Tuple{Type, DataType, String}}}(),
     )
 end
 
@@ -322,7 +323,7 @@ function add_assignment!(
     if haskey(cache.assignments, uuid)
         by_component = cache.assignments[uuid]
     else
-        by_component = Set{Tuple{DataType, DataType, String}}()
+        by_component = Set{Tuple{Type, DataType, String}}()
         cache.assignments[uuid] = by_component
     end
 

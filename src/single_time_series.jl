@@ -230,6 +230,13 @@ function SingleTimeSeries(ts_metadata::SingleTimeSeriesMetadata, data::TimeSerie
     )
 end
 
+# The deserialize path calls `T(metadata, data)` with the concrete parametric
+# type (e.g. `SingleTimeSeries{Float64}`); forward to the eltype-inferring path.
+SingleTimeSeries{T}(
+    ts_metadata::SingleTimeSeriesMetadata,
+    data::TimeSeries.TimeArray,
+) where {T} = SingleTimeSeries(ts_metadata, data)
+
 function SingleTimeSeriesMetadata(ts::SingleTimeSeries; features...)
     return SingleTimeSeriesMetadata(
         get_name(ts),

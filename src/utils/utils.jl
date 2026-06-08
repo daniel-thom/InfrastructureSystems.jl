@@ -108,6 +108,11 @@ function _get_all_concrete_subtypes(::Type{T}, sub_types::Vector{DataType}) wher
             push!(sub_types, sub_type)
         elseif isabstracttype(sub_type)
             _get_all_concrete_subtypes(sub_type, sub_types)
+        elseif sub_type isa UnionAll
+            # Parametric leaf type (e.g. `SingleTimeSeries{T}`): record its body so
+            # `nameof()` still yields the type name used by callers.
+            body = Base.unwrap_unionall(sub_type)
+            body isa DataType && push!(sub_types, body)
         end
     end
 

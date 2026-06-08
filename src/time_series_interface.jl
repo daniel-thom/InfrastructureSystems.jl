@@ -973,6 +973,13 @@ Return true if the component or supplemental attribute has time series data.
 function has_time_series(owner::TimeSeriesOwners; kwargs...)
     mgr = get_time_series_manager(owner)
     isnothing(mgr) && return false
+    if _uses_rust_store(mgr)
+        kw = Dict(kwargs)
+        name = pop!(kw, :name, nothing)
+        T = pop!(kw, :time_series_type, TimeSeriesData)
+        isnothing(name) && return _rust_has_any(owner; time_series_type = T)
+        return _rust_has_time_series(T === TimeSeriesData ? SingleTimeSeries : T, owner, name; kw...)
+    end
     return has_metadata(mgr.metadata_store, owner; kwargs...)
 end
 
@@ -985,6 +992,7 @@ function has_time_series(
 ) where {T <: TimeSeriesData}
     mgr = get_time_series_manager(val)
     isnothing(mgr) && return false
+    _uses_rust_store(mgr) && return _rust_has_any(val; time_series_type = T)
     return has_metadata(mgr.metadata_store, val; time_series_type = T)
 end
 
