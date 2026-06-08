@@ -285,12 +285,12 @@ function add_probabilistic!(
     store::RustTimeSeriesStore, owner_uuid::AbstractString, owner_type::AbstractString,
     owner_category::AbstractString, name::AbstractString, initial_timestamp::Dates.DateTime,
     resolution::Dates.Period, horizon::Dates.Period, interval::Dates.Period, count::Integer,
-    percentiles::Vector{Float64}, flat_values::Vector{Float64};
+    percentiles::Vector{Float64}, data::AbstractArray;
     features = Dict{String, Any}(), units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
     TSS.add_probabilistic!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
-        name, initial_timestamp, resolution, horizon, interval, count, percentiles, flat_values;
+        name, initial_timestamp, resolution, horizon, interval, count, percentiles, data;
         features = features, units = units, scaling_factor_multiplier = scaling_factor_multiplier)
     return
 end
@@ -305,12 +305,12 @@ function add_forecast!(
     store::RustTimeSeriesStore, owner_uuid::AbstractString, owner_type::AbstractString,
     owner_category::AbstractString, name::AbstractString, ts_type::Integer,
     initial_timestamp::Dates.DateTime, resolution::Dates.Period, horizon::Dates.Period,
-    interval::Dates.Period, count::Integer, flat_values::Vector{Float64};
+    interval::Dates.Period, count::Integer, data::AbstractArray;
     features = Dict{String, Any}(), units::Union{Nothing, AbstractString} = nothing,
     scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
     TSS.add_forecast!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
-        name, ts_type, initial_timestamp, resolution, horizon, interval, count, flat_values;
+        name, ts_type, initial_timestamp, resolution, horizon, interval, count, data;
         features = features, units = units, scaling_factor_multiplier = scaling_factor_multiplier)
     return
 end
@@ -333,12 +333,6 @@ remove_typed!(store::RustTimeSeriesStore, owner_uuid::AbstractString, name::Abst
     TSS.remove_typed!(store.inner, owner_uuid, name, ts_type;
         resolution = resolution, features = features)
 
-# Flatten a Deterministic's SortedDict windows column-major: [w1; w2; ...].
-function _flatten_deterministic(ts::Deterministic)
-    windows = collect(values(get_data(ts)))
-    return (Float64.(reduce(vcat, windows)), length(first(windows)), length(windows))
-end
-
 """Add a Deterministic or DeterministicSingleTimeSeries via the Rust store."""
 function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
     store = mgr.data_store::RustTimeSeriesStore
@@ -355,24 +349,26 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
             resolution = resolution, features = feats)
             throw(ArgumentError("Time series data with duplicate attributes are already stored"))
         end
-        flat = vec(Float64.(get_array_for_hdf(ts)))
+        arr = Float64.(get_array_for_hdf(ts))  # (percentile_count, horizon_count, count)
         add_probabilistic!(store, owner_uuid, owner_type, owner_category, name,
             get_initial_timestamp(ts), resolution, get_horizon(ts), interval,
-            get_count(ts), Float64.(get_percentiles(ts)), flat; features = feats)
+            get_count(ts), Float64.(get_percentiles(ts)), arr; features = feats)
         return ForecastKey(;
             time_series_type = typeof(ts), name = name,
             initial_timestamp = get_initial_timestamp(ts), resolution = resolution,
             horizon = get_horizon(ts), interval = interval, count = get_count(ts),
             features = Dict{String, Any}(feats))
     elseif ts isa Deterministic
-        flat, _, count = _flatten_deterministic(ts)
+        windows = collect(values(get_data(ts)))
+        arr = Float64.(reduce(hcat, windows))  # (horizon_count, count)
+        count = length(windows)
         ts_type = RTS_TYPE_DETERMINISTIC
     elseif ts isa DeterministicSingleTimeSeries
-        flat = Float64.(TimeSeries.values(get_data(get_single_time_series(ts))))
+        arr = Float64.(TimeSeries.values(get_data(get_single_time_series(ts))))
         count = get_count(ts)
         ts_type = RTS_TYPE_DETERMINISTIC_SINGLE
     elseif ts isa Scenarios
-        flat = vec(Float64.(get_array_for_hdf(ts)))  # (scenario_count, horizon_count, count)
+        arr = Float64.(get_array_for_hdf(ts))  # (scenario_count, horizon_count, count)
         count = get_count(ts)
         ts_type = RTS_TYPE_SCENARIOS
     else
@@ -383,7 +379,7 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
         throw(ArgumentError("Time series data with duplicate attributes are already stored"))
     end
     add_forecast!(store, owner_uuid, owner_type, owner_category, name, ts_type,
-        get_initial_timestamp(ts), resolution, get_horizon(ts), interval, count, flat;
+        get_initial_timestamp(ts), resolution, get_horizon(ts), interval, count, arr;
         features = feats)
     return ForecastKey(;
         time_series_type = typeof(ts), name = name,
@@ -405,10 +401,10 @@ function _rust_get_forecast(
         resolution = resolution, features = feats)
         m = get_probabilistic_metadata(store, owner_uuid, name;
             resolution = resolution, features = feats)
-        flat = get_array_by_hash(store, m.data_hash)
         percentile_count = length(m.percentiles)
-        horizon_count = div(m.length, percentile_count * m.count)
-        arr = reshape(flat, percentile_count, horizon_count, m.count)
+        horizon_count = Int(div(m.horizon, m.resolution))
+        arr = TSS.get_array_nd(store.inner, m.data_hash, Float64,
+            (percentile_count, horizon_count, m.count))
         data = SortedDict{Dates.DateTime, Matrix{Float64}}()
         for i in 1:(m.count)
             data[m.initial_timestamp + m.interval * (i - 1)] = permutedims(arr[:, :, i])
@@ -419,9 +415,8 @@ function _rust_get_forecast(
         resolution = resolution, features = feats)
         m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_DETERMINISTIC;
             resolution = resolution, features = feats)
-        flat = get_array_by_hash(store, m.data_hash)
-        horizon_count = div(m.length, m.count)
-        mat = reshape(flat, horizon_count, m.count)
+        horizon_count = Int(div(m.horizon, m.resolution))
+        mat = TSS.get_array_nd(store.inner, m.data_hash, Float64, (horizon_count, m.count))
         data = SortedDict{Dates.DateTime, Vector{Float64}}()
         for i in 1:(m.count)
             data[m.initial_timestamp + m.interval * (i - 1)] = mat[:, i]
@@ -443,10 +438,10 @@ function _rust_get_forecast(
         resolution = resolution, features = feats)
         m = get_forecast_metadata(store, owner_uuid, name, RTS_TYPE_SCENARIOS;
             resolution = resolution, features = feats)
-        flat = get_array_by_hash(store, m.data_hash)
         horizon_count = Int(div(m.horizon, m.resolution))
-        scenario_count = div(m.length, horizon_count * m.count)
-        arr = reshape(flat, scenario_count, horizon_count, m.count)
+        scenario_count = m.length  # native shape[0]
+        arr = TSS.get_array_nd(store.inner, m.data_hash, Float64,
+            (scenario_count, horizon_count, m.count))
         data = SortedDict{Dates.DateTime, Matrix{Float64}}()
         for i in 1:(m.count)
             data[m.initial_timestamp + m.interval * (i - 1)] = permutedims(arr[:, :, i])
