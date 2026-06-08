@@ -616,7 +616,7 @@ check_consistency(::TimeSeriesMetadataStore, ::Type{<:Forecast}) = nothing
 Throw InvalidValue if the SingleTimeSeries arrays have different initial times or lengths.
 Return the initial timestamp and length as a tuple.
 """
-function check_consistency(store::TimeSeriesMetadataStore, ::Type{SingleTimeSeries})
+function check_consistency(store::TimeSeriesMetadataStore, ::Type{<:SingleTimeSeries})
     query = """
         SELECT
             DISTINCT initial_timestamp

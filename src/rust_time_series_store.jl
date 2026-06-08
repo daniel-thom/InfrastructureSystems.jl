@@ -179,6 +179,12 @@ function compare_values(
     return get_counts(x) == get_counts(y)
 end
 
+# Element type requested via `SingleTimeSeries{T}`; `nothing` for the unparametrized
+# `SingleTimeSeries`, in which case the caller falls back to the stored dtype.
+_rust_sts_eltype(::Type{SingleTimeSeries{E}}) where {E} = E
+_rust_sts_eltype(::Type{SingleTimeSeries}) = nothing
+_rust_sts_eltype(::Type{<:TimeSeriesData}) = nothing
+
 # ---- TimeSeriesManager routing (SingleTimeSeries only) ---------------------
 
 """
@@ -248,7 +254,9 @@ function _rust_get_time_series(
     owner_uuid, _, _ = _rust_owner_args(owner)
     feats = _rust_features(features)
     meta = get_metadata(store, owner_uuid, name; resolution = resolution, features = feats)
-    full = get_array_by_hash(store, meta.data_hash)
+    # Honor a requested element type (`SingleTimeSeries{T}`); else use the stored dtype.
+    elT = something(_rust_sts_eltype(T), meta.dtype)
+    full = get_array_by_hash(store, meta.data_hash, elT)
 
     start = isnothing(start_time) ? meta.initial_timestamp : start_time
     index = compute_time_array_index(meta.initial_timestamp, start, meta.resolution)

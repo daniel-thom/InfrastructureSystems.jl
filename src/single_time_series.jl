@@ -21,7 +21,7 @@ such as a series of historical measurements or realizations or a single scenario
     data are scaling factors. Called on the associated component to convert the values.
   - `internal::InfrastructureSystemsInternal`
 """
-mutable struct SingleTimeSeries <: StaticTimeSeries
+mutable struct SingleTimeSeries{T} <: StaticTimeSeries
     "user-defined name"
     name::String
     "timestamp - scalingfactor"
@@ -31,6 +31,25 @@ mutable struct SingleTimeSeries <: StaticTimeSeries
     "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
     scaling_factor_multiplier::Union{Nothing, Function}
     internal::InfrastructureSystemsInternal
+end
+
+# The element type parameter `T` is the value eltype; infer it from the data so
+# callers never have to spell it out. `SingleTimeSeries{T}(...)` (the inner
+# constructor) remains available for explicit typing.
+function SingleTimeSeries(
+    name,
+    data::TimeSeries.TimeArray,
+    resolution,
+    scaling_factor_multiplier,
+    internal::InfrastructureSystemsInternal,
+)
+    return SingleTimeSeries{eltype(TimeSeries.values(data))}(
+        name,
+        data,
+        resolution,
+        scaling_factor_multiplier,
+        internal,
+    )
 end
 
 function SingleTimeSeries(;
@@ -53,6 +72,12 @@ function SingleTimeSeries(;
         internal,
     )
 end
+
+"""
+Return the value element type of a `SingleTimeSeries` as a string, e.g.
+`"Float64"` or `"...LinearFunctionData"`. This is the `T` of `SingleTimeSeries{T}`.
+"""
+get_data_type(::SingleTimeSeries{T}) where {T} = string(T)
 
 """
 Construct SingleTimeSeries that shares the data from an existing instance.
