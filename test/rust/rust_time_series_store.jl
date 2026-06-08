@@ -139,3 +139,59 @@ end
     @test eltype(got_pwl) == IS.PiecewiseLinearData
     @test all(IS.get_points(got_pwl[i]) == IS.get_points(pwl[i]) for i in 1:3)
 end
+
+@testset "CompressionSettings flow through to the Rust backend" begin
+    settings = [
+        IS.CompressionSettings(; enabled = false),
+        IS.CompressionSettings(; enabled = true, type = IS.CompressionTypes.DEFLATE, level = 9),
+        IS.CompressionSettings(;
+            enabled = true,
+            type = IS.CompressionTypes.DEFLATE,
+            level = 1,
+            shuffle = false,
+        ),
+    ]
+    for compression in settings
+        mktempdir() do dir
+            base = joinpath(dir, "system_time_series.nc")
+            store = IS.RustTimeSeriesStore(; in_memory = false, path = base, compression = compression)
+            @test IS.get_compression_settings(store) == compression
+            sts = make_sts("load", INITIAL, RES, VALUES)
+            IS.serialize_single!(store, OWNER, "Generator", "Component", "load", sts)
+            IS.flush!(store)
+            IS.close!(store)
+
+            reopened = IS.open_rust_store(base; read_only = true)
+            try
+                # The reopened store reports the persisted policy (queried over
+                # the FFI), not a placeholder.
+                restored = IS.get_compression_settings(reopened)
+                @test restored.enabled == compression.enabled
+                if compression.enabled
+                    @test restored.type == compression.type
+                    @test restored.level == compression.level
+                    @test restored.shuffle == compression.shuffle
+                end
+                got = IS.get_single(reopened, OWNER, "load"; resolution = RES)
+                @test TimeSeries.values(IS.get_data(got)) == VALUES
+            finally
+                IS.close!(reopened)
+            end
+        end
+    end
+
+    # End-to-end: a SystemData created with DEFLATE level 9 round-trips, and the
+    # setting reaches the storage layer.
+    sys = IS.SystemData(;
+        time_series_backend = :rust,
+        compression = IS.CompressionSettings(; enabled = true, level = 9),
+    )
+    @test IS.get_compression_settings(sys).enabled
+    @test IS.get_compression_settings(sys).level == 9
+
+    # BLOSC is not supported by the Rust backend.
+    @test_throws ErrorException IS.RustTimeSeriesStore(;
+        in_memory = true,
+        compression = IS.CompressionSettings(; enabled = true, type = IS.CompressionTypes.BLOSC),
+    )
+end

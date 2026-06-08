@@ -21,18 +21,44 @@ mutable struct RustTimeSeriesStore <: TimeSeriesStorage
     inner::TSS.Store
     "Filesystem base path for the `.nc` / `.sqlite` pair (nothing if in-memory)."
     path::Union{Nothing, String}
+    "Compression policy the store was created/opened with."
+    compression::CompressionSettings
 end
 
 """
-    RustTimeSeriesStore(; in_memory=false, path=nothing)
+    RustTimeSeriesStore(; in_memory=false, path=nothing, compression=CompressionSettings())
 
 Create a Rust-backed time series store. When `in_memory=false`, `path` is the
 base path for the on-disk artifacts (`<path>.nc` and `<path>.sqlite`).
+
+`compression` is a [`CompressionSettings`](@ref). The Rust backend supports
+`DEFLATE` (with `level` 0-9 and `shuffle`) or no compression (`enabled=false`);
+`BLOSC` is not available and raises an error.
 """
-function RustTimeSeriesStore(; in_memory::Bool = false, path = nothing)
-    store = in_memory ? TSS.Store(; in_memory = true) :
-            TSS.Store(; in_memory = false, path = path)
-    return RustTimeSeriesStore(store, path === nothing ? nothing : String(path))
+function RustTimeSeriesStore(;
+    in_memory::Bool = false,
+    path = nothing,
+    compression::CompressionSettings = CompressionSettings(),
+)
+    kwargs = _rust_compression_kwargs(compression)
+    store = in_memory ? TSS.Store(; in_memory = true, kwargs...) :
+            TSS.Store(; in_memory = false, path = path, kwargs...)
+    return RustTimeSeriesStore(store, path === nothing ? nothing : String(path), compression)
+end
+
+# Translate a `CompressionSettings` into the keyword arguments accepted by
+# `TimeSeriesStore.Store`. BLOSC is not supported by the Rust backend.
+function _rust_compression_kwargs(c::CompressionSettings)
+    if !c.enabled
+        return (; compression = :none)
+    end
+    if c.type == CompressionTypes.DEFLATE
+        return (; compression = :deflate, compression_level = c.level, shuffle = c.shuffle)
+    end
+    error(
+        "The Rust time-series-store backend does not support $(c.type) compression; " *
+        "use CompressionTypes.DEFLATE or disable compression (enabled=false).",
+    )
 end
 
 """
@@ -41,7 +67,21 @@ end
 Open an existing on-disk Rust store from its `.nc` base path.
 """
 function open_rust_store(path::AbstractString; read_only::Bool = false)
-    return RustTimeSeriesStore(TSS.open_store(String(path); read_only = read_only), String(path))
+    inner = TSS.open_store(String(path); read_only = read_only)
+    # Report the policy the store was created with, restored from the file.
+    return RustTimeSeriesStore(inner, String(path), _compression_settings(TSS.get_compression(inner)))
+end
+
+# Translate the `TimeSeriesStore.get_compression` NamedTuple back into a
+# `CompressionSettings`.
+function _compression_settings(c)
+    c.compression == :none && return CompressionSettings(; enabled = false)
+    return CompressionSettings(;
+        enabled = true,
+        type = CompressionTypes.DEFLATE,
+        level = c.level,
+        shuffle = c.shuffle,
+    )
 end
 
 close!(store::RustTimeSeriesStore) = TSS.close!(store.inner)
@@ -223,7 +263,7 @@ flush!(store::RustTimeSeriesStore) = TSS.flush!(store.inner)
 Base.isempty(store::RustTimeSeriesStore) = get_num_time_series(store) == 0
 
 # No NetCDF compression knob is exposed through the FFI yet.
-get_compression_settings(::RustTimeSeriesStore) = CompressionSettings(; enabled = false)
+get_compression_settings(store::RustTimeSeriesStore) = store.compression
 
 """
     serialize(store::RustTimeSeriesStore, file_path)

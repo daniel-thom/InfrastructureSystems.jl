@@ -46,7 +46,8 @@ function TimeSeriesManager(;
                 mkpath(dir)
                 joinpath(dir, string(UUIDs.uuid4()) * "_time_series.nc")
             end
-            data_store = RustTimeSeriesStore(; in_memory = in_memory, path = path)
+            data_store =
+                RustTimeSeriesStore(; in_memory = in_memory, path = path, compression = compression)
         else
             data_store = make_time_series_storage(;
                 in_memory = in_memory,
