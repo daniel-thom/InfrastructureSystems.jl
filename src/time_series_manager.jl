@@ -39,7 +39,11 @@ function TimeSeriesManager(;
             path = if in_memory
                 nothing
             else
+                # `directory` may be an explicit kwarg, the SIENNA_TIME_SERIES_DIRECTORY
+                # env var, or `tempdir()`. Create it if missing (e.g. an HPC
+                # per-job scratch path that doesn't exist yet).
                 dir = isnothing(directory) ? tempdir() : directory
+                mkpath(dir)
                 joinpath(dir, string(UUIDs.uuid4()) * "_time_series.nc")
             end
             data_store = RustTimeSeriesStore(; in_memory = in_memory, path = path)
