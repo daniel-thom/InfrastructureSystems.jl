@@ -102,7 +102,7 @@ end
 @testset "Test JSON serialization of system data" begin
     # On-disk time series serialization now uses the Rust backend (HDF5 removed).
     if rust_ts_available()
-        sys = create_system_data_shared_time_series(; time_series_backend = :rust)
+        sys = create_system_data_shared_time_series()
         _, result = validate_serialization(sys)
         @test result
     else
@@ -130,7 +130,7 @@ end
 
 @testset "Test JSON serialization of with read-only time series" begin
     if rust_ts_available()
-        sys = create_system_data_shared_time_series(; time_series_backend = :rust)
+        sys = create_system_data_shared_time_series()
         sys2, result = validate_serialization(sys; time_series_read_only = true)
         @test result
 
@@ -143,7 +143,7 @@ end
 
 @testset "Test JSON serialization of with mutable time series" begin
     if rust_ts_available()
-        sys = create_system_data_shared_time_series(; time_series_backend = :rust)
+        sys = create_system_data_shared_time_series()
         sys2, result = validate_serialization(sys; time_series_read_only = false)
         @test result
         component = first(IS.get_components(IS.TestComponent, sys2))
@@ -163,7 +163,7 @@ end
     if !rust_ts_available()
         @test_skip false  # on-disk serialization needs the Rust backend
     else
-    sys = IS.SystemData(; time_series_backend = :rust)
+    sys = IS.SystemData()
     initial_time = Dates.DateTime("2020-09-01")
     resolution = Dates.Hour(1)
     ta = TimeSeries.TimeArray(range(initial_time; length = 24, step = resolution), rand(24))
@@ -268,9 +268,15 @@ end
 end
 
 @testset "Test serialization of deserialized system" begin
-    # create_system_data adds a Deterministic with a scaling_factor_multiplier,
-    # which the Rust backend doesn't serialize yet (and on-disk serialization of a
-    # time-series system needs the Rust backend post-HDF5). Re-enable once
-    # scaling_factor_multiplier is supported on the Rust path.
-    @test_skip false
+    if rust_ts_available()
+        # create_system_data adds a Deterministic with a scaling_factor_multiplier,
+        # now supported on the Rust path; verify a deserialized system re-serializes.
+        sys = create_system_data(; with_time_series = true)
+        sys2, result = validate_serialization(sys)
+        @test result
+        _, result2 = validate_serialization(sys2)
+        @test result2
+    else
+        @test_skip false
+    end
 end

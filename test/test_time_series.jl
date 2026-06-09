@@ -716,18 +716,13 @@ end
     @test length(IS.get_time_series_keys(component)) == 4
     @test IS.get_time_series_type(IS.get_time_series_keys(component)[1]) ===
           IS.SingleTimeSeries
-    @test Tables.rowtable(
-        IS.sql(
-            sys.time_series_manager.metadata_store,
-            "SELECT COUNT (DISTINCT metadata_uuid) AS count FROM $(IS.ASSOCIATIONS_TABLE_NAME)",
-        ),
-    )[1].count == 4
+    @test length(IS.get_time_series_metadata(component)) == 4
     for key in IS.get_time_series_keys(component)
         @test IS.get_data(IS.get_time_series(component, key)) == data
     end
     IS.remove_time_series!(sys, IS.SingleTimeSeries)
     @test isempty(IS.get_time_series_keys(component))
-    @test isempty(sys.time_series_manager.metadata_store.metadata_uuids)
+    @test IS.get_num_time_series(sys) == 0
 end
 
 @testset "Test add with features with mixed types" begin
@@ -1934,8 +1929,8 @@ end
     end
 
     ts_storage = sys.time_series_manager.data_store
-    @test ts_storage isa IS.InMemoryTimeSeriesStorage
-    @test IS.get_num_time_series(ts_storage) == 1
+    @test ts_storage isa IS.RustTimeSeriesStore
+    @test IS.get_num_time_series(sys) == 1
 end
 
 @testset "Test get_time_series_multiple" begin
@@ -3178,12 +3173,8 @@ end
     path = mkpath("tmp-ts-dir")
     ENV[IS.TIME_SERIES_DIRECTORY_ENV_VAR] = path
     try
-        if rust_ts_available()
-            sys = IS.SystemData(; time_series_backend = :rust)
-            @test splitpath(sys.time_series_manager.data_store.path)[1] == path
-        else
-            @test_skip false
-        end
+        sys = IS.SystemData(; time_series_in_memory = false)
+        @test splitpath(sys.time_series_manager.data_store.path)[1] == path
     finally
         pop!(ENV, IS.TIME_SERIES_DIRECTORY_ENV_VAR)
     end
@@ -3703,239 +3694,6 @@ end
     res = IS.get_time_series(component, key)
     @test res isa IS.Deterministic
     @test IS.get_data(res) == IS.get_data(bystander)
-end
-
-@testset "Test migration of IS 2.3 time series schema to metadata format v1.0.0" begin
-    filename, component = _setup_for_migration_tests_from_IS_v2_3()
-    new_db = SQLite.DB(filename)
-    @test IS._needs_migration_from_v2_3(new_db)
-    new_store = IS.TimeSeriesMetadataStore(filename)
-    @test !IS._needs_migration_from_v2_4(new_store.db)
-    result = IS.list_metadata(new_store, component)
-    @test length(result) == 4
-end
-
-@testset "Test migration of IS 2.4 time series schema to metadata format v1.0.0" begin
-    filename, component = _setup_for_migration_tests_from_IS_v2_4()
-    new_db = SQLite.DB(filename)
-    new_rows = Tuple[]
-    for row in Tables.rowtable(
-        SQLite.DBInterface.execute(
-            new_db,
-            "SELECT * FROM $(IS.ASSOCIATIONS_TABLE_NAME)",
-        ),
-    )
-        new_row = (
-            row.id,
-            row.time_series_uuid,
-            row.time_series_type,
-            "unused_time_series_category",
-            row.initial_timestamp,
-            IS.from_iso_8601(row.resolution),
-            ismissing(row.horizon) ? nothing : IS.from_iso_8601(row.horizon),
-            ismissing(row.interval) ? nothing : IS.from_iso_8601(row.interval),
-            row.window_count,
-            row.length,
-            row.name,
-            row.owner_uuid,
-            row.owner_type,
-            row.owner_category,
-            row.features,
-            row.metadata_uuid,
-        )
-        push!(new_rows, new_row)
-    end
-    SQLite.DBInterface.execute(new_db, "DROP TABLE $(IS.ASSOCIATIONS_TABLE_NAME)")
-    # This is the original schema for the migration.
-    schema = [
-        "id INTEGER PRIMARY KEY",
-        "time_series_uuid TEXT NOT NULL",
-        "time_series_type TEXT NOT NULL",
-        "time_series_category TEXT NOT NULL",
-        "initial_timestamp TEXT NOT NULL",
-        "resolution_ms INTEGER NOT NULL",
-        "horizon_ms INTEGER",
-        "interval_ms INTEGER",
-        "window_count INTEGER",
-        "length INTEGER",
-        "name TEXT NOT NULL",
-        "owner_uuid TEXT NOT NULL",
-        "owner_type TEXT NOT NULL",
-        "owner_category TEXT NOT NULL",
-        "features TEXT NOT NULL",
-        "metadata_uuid TEXT NOT NULL",
-    ]
-    schema_text = join(schema, ",")
-    SQLite.DBInterface.execute(
-        new_db,
-        "CREATE TABLE $(IS.ASSOCIATIONS_TABLE_NAME)($(schema_text))",
-    )
-    IS._add_rows!(
-        new_db,
-        new_rows,
-        (
-            "id",
-            "time_series_uuid",
-            "time_series_type",
-            "time_series_category",
-            "initial_timestamp",
-            "resolution_ms",
-            "horizon_ms",
-            "interval_ms",
-            "window_count",
-            "length",
-            "name",
-            "owner_uuid",
-            "owner_type",
-            "owner_category",
-            "features",
-            "metadata_uuid",
-        ),
-        IS.ASSOCIATIONS_TABLE_NAME,
-    )
-    @test IS._needs_migration_from_v2_4(new_db)
-    new_store = IS.TimeSeriesMetadataStore(filename)
-    @test !IS._needs_migration_from_v2_4(new_store.db)
-    result = IS.list_metadata(new_store, component)
-    @test length(result) == 4
-end
-
-"""
-Create a SQLite database in the format of IS v2.3. Return the db filename.
-"""
-function _setup_for_migration_tests_from_IS_v2_3()
-    sys, component = _create_system_for_migration_tests()
-    filename = IS.backup_to_temp(sys.time_series_manager.metadata_store)
-    new_db = SQLite.DB(filename)
-    SQLite.DBInterface.execute(new_db, "DROP TABLE time_series_associations")
-    SQLite.DBInterface.execute(new_db, "DROP TABLE $(IS.KEY_VALUE_TABLE_NAME)")
-    try
-        _create_metadata_table_v2_3!(new_db)
-        placeholder = repeat("?,", 15) * "jsonb(?)"
-        query = "INSERT INTO $(IS.METADATA_TABLE_NAME) VALUES($placeholder)"
-        SQLite.transaction(new_db) do
-            stmt = SQLite.Stmt(new_db, query)
-            for metadata in values(sys.time_series_manager.metadata_store.metadata_uuids)
-                owner_category = "Component"
-                ts_type = IS.time_series_metadata_to_data(metadata)
-                @assert ts_type === IS.SingleTimeSeries
-                ts_category = "StaticTimeSeries"
-                features = IS.make_features_string(metadata.features)
-                params =
-                    (
-                        missing,
-                        string(IS.get_time_series_uuid(metadata)),
-                        string(nameof(ts_type)),
-                        ts_category,
-                        string(IS.get_initial_timestamp(metadata)),
-                        Dates.Millisecond(IS.get_resolution(metadata)).value,
-                        missing,
-                        missing,
-                        missing,
-                        IS.get_length(metadata),
-                        IS.get_name(metadata),
-                        string(IS.get_uuid(component)),
-                        string(nameof(typeof(component))),
-                        owner_category,
-                        features,
-                        JSON3.write(IS.serialize(metadata)),
-                    )
-                SQLite.DBInterface.execute(stmt, params)
-            end
-        end
-    finally
-        close(new_db)
-    end
-    return filename, component
-end
-
-function _setup_for_migration_tests_from_IS_v2_4()
-    sys, component = _create_system_for_migration_tests()
-    filename = IS.backup_to_temp(sys.time_series_manager.metadata_store)
-    new_db = SQLite.DB(filename)
-    SQLite.DBInterface.execute(new_db, "DROP TABLE $(IS.KEY_VALUE_TABLE_NAME)")
-    try
-        _create_metadata_table_v2_4!(new_db)
-        query = "INSERT INTO $(IS.METADATA_TABLE_NAME) VALUES(?,?,jsonb(?))"
-        SQLite.transaction(new_db) do
-            stmt = SQLite.Stmt(new_db, query)
-            for metadata in values(sys.time_series_manager.metadata_store.metadata_uuids)
-                params =
-                    (
-                        missing,
-                        string(IS.get_uuid(metadata)),
-                        JSON3.write(IS.serialize(metadata)),
-                    )
-                SQLite.DBInterface.execute(stmt, params)
-            end
-        end
-    finally
-        close(new_db)
-    end
-    return filename, component
-end
-
-function _create_system_for_migration_tests()
-    sys = IS.SystemData()
-    name = "Component1"
-    component = IS.TestComponent(name, 5)
-    IS.add_component!(sys, component)
-
-    initial_time = Dates.DateTime("2020-09-01")
-    resolution = Dates.Hour(1)
-
-    data = TimeSeries.TimeArray(
-        range(initial_time; length = 5, step = resolution),
-        rand(5),
-    )
-    ts_name = "test_c"
-    ts = IS.SingleTimeSeries(; data = data, name = ts_name)
-    IS.add_time_series!(sys, component, ts; scenario = "low", model_year = "2030")
-    IS.add_time_series!(sys, component, ts; scenario = "high", model_year = "2030")
-    IS.add_time_series!(sys, component, ts; scenario = "low", model_year = "2035")
-    IS.add_time_series!(sys, component, ts; scenario = "high", model_year = "2035")
-    return sys, component
-end
-
-function _create_metadata_table_v2_4!(db::SQLite.DB)
-    schema = [
-        "id INTEGER PRIMARY KEY",
-        "metadata_uuid TEXT NOT NULL",
-        "metadata JSON NOT NULL",
-    ]
-    schema_text = join(schema, ",")
-    SQLite.DBInterface.execute(
-        db,
-        "CREATE TABLE $(IS.METADATA_TABLE_NAME)($(schema_text))",
-    )
-    return
-end
-
-function _create_metadata_table_v2_3!(db::SQLite.DB)
-    schema = [
-        "id INTEGER PRIMARY KEY",
-        "time_series_uuid TEXT NOT NULL",
-        "time_series_type TEXT NOT NULL",
-        "time_series_category TEXT NOT NULL",
-        "initial_timestamp TEXT NOT NULL",
-        "resolution_ms INTEGER NOT NULL",
-        "horizon_ms INTEGER",
-        "interval_ms INTEGER",
-        "window_count INTEGER",
-        "length INTEGER",
-        "name TEXT NOT NULL",
-        "owner_uuid TEXT NOT NULL",
-        "owner_type TEXT NOT NULL",
-        "owner_category TEXT NOT NULL",
-        "features TEXT NOT NULL",
-        "metadata JSON NOT NULL",
-    ]
-    schema_text = join(schema, ",")
-    SQLite.DBInterface.execute(
-        db,
-        "CREATE TABLE time_series_metadata($(schema_text))",
-    )
-    return
 end
 
 @testset "Test invalid normalization factors" begin
@@ -5024,15 +4782,6 @@ end
     end
 end
 
-@testset "Test to_dataframe" begin
-    sys = create_system_data(; with_time_series = true, time_series_in_memory = true)
-    @test IS.to_dataframe(sys.time_series_manager.metadata_store) isa DataFrame
-    @test IS.to_dataframe(
-        sys.time_series_manager.metadata_store;
-        table = IS.KEY_VALUE_TABLE_NAME,
-    ) isa DataFrame
-end
-
 @testset "Test removal of SingleTimeSeries attached to a DeterministicSingleTimeSeries" begin
     sys = IS.SystemData()
     name = "Component1"
@@ -5107,8 +4856,6 @@ end
     )
     ts_name = "test"
     data = IS.SingleTimeSeries(; data = data, name = ts_name)
-    # prevent the indices from affecting the order of removal
-    IS._drop_all_indexes!(sys.time_series_manager.metadata_store.db)
     IS.add_time_series!(sys, component1, data)
     IS.add_time_series!(sys, component2, data)
 
@@ -5206,37 +4953,4 @@ end
         data = data_wrong_key,
         resolution = resolution,
     )
-end
-
-@testset "Test optimize_database! for TimeSeriesMetadataStore" begin
-    sys = IS.SystemData()
-    component1 = IS.TestComponent("component1", 5)
-    component2 = IS.TestComponent("component2", 7)
-    IS.add_component!(sys, component1)
-    IS.add_component!(sys, component2)
-
-    initial_time = Dates.DateTime("2020-09-01")
-    resolution = Dates.Hour(1)
-
-    # Add several time series to create data for optimization
-    for i in 1:10
-        data = TimeSeries.TimeArray(
-            range(initial_time; length = 24, step = resolution),
-            rand(24),
-        )
-        ts = IS.SingleTimeSeries(; data = data, name = "test_$i")
-        IS.add_time_series!(sys, component1, ts)
-        IS.add_time_series!(sys, component2, ts)
-    end
-
-    # Verify data was added
-    @test IS.get_num_time_series(sys.time_series_manager.metadata_store) == 10
-
-    # Call optimize_database! - should not throw and data should remain intact
-    IS.optimize_database!(sys.time_series_manager.metadata_store)
-
-    # Verify data is still accessible after optimization
-    @test IS.get_num_time_series(sys.time_series_manager.metadata_store) == 10
-    @test IS.has_time_series(component1)
-    @test IS.has_time_series(component2)
 end

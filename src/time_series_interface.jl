@@ -68,27 +68,10 @@ function get_time_series(
     features...,
 ) where {T <: TimeSeriesData}
     TimerOutputs.@timeit_debug SYSTEM_TIMERS "get_time_series" begin
-        mgr = get_time_series_manager(owner)
-        if !isnothing(mgr) && _uses_rust_store(mgr)
-            return _rust_get_time_series(
-                T, owner, name;
-                start_time = start_time, len = len, resolution = resolution, features...,
-            )
-        end
-        ts_metadata =
-            get_time_series_metadata(
-                T,
-                owner,
-                name;
-                resolution = resolution,
-                interval = interval,
-                features...,
-            )
-        start_time = _check_start_time(start_time, ts_metadata)
-        rows = _get_rows(start_time, len, ts_metadata)
-        columns = _get_columns(start_time, count, ts_metadata)
-        storage = get_time_series_storage(owner)
-        return deserialize_time_series(T, storage, ts_metadata, rows, columns)
+        return _rust_get_time_series(
+            T, owner, name;
+            start_time = start_time, len = len, resolution = resolution, features...,
+        )
     end
 end
 
@@ -180,30 +163,14 @@ function get_time_series_multiple(
     mgr = get_time_series_manager(owner)
     # This is true when the component or attribute is not part of a system.
     isnothing(mgr) && return ()
-    storage = get_time_series_storage(owner)
-
-    Channel() do channel
-        for metadata in list_metadata(
-            mgr,
-            owner;
-            time_series_type = type,
-            name = name,
-            resolution = resolution,
-            interval = interval,
-        )
-            ts = deserialize_time_series(
-                isnothing(type) ? time_series_metadata_to_data(metadata) : type,
-                storage,
-                metadata,
-                UnitRange(1, length(metadata)),
-                UnitRange(1, get_count(metadata)),
-            )
-            if !isnothing(filter_func) && !filter_func(ts)
-                continue
-            end
-            put!(channel, ts)
-        end
-    end
+    return _rust_get_time_series_multiple(
+        owner,
+        filter_func;
+        type = type,
+        name = name,
+        resolution = resolution,
+        interval = interval,
+    )
 end
 
 function get_time_series_uuid(
@@ -973,14 +940,11 @@ Return true if the component or supplemental attribute has time series data.
 function has_time_series(owner::TimeSeriesOwners; kwargs...)
     mgr = get_time_series_manager(owner)
     isnothing(mgr) && return false
-    if _uses_rust_store(mgr)
-        kw = Dict(kwargs)
-        name = pop!(kw, :name, nothing)
-        T = pop!(kw, :time_series_type, TimeSeriesData)
-        isnothing(name) && return _rust_has_any(owner; time_series_type = T)
-        return _rust_has_time_series(T === TimeSeriesData ? SingleTimeSeries : T, owner, name; kw...)
-    end
-    return has_metadata(mgr.metadata_store, owner; kwargs...)
+    kw = Dict(kwargs)
+    name = pop!(kw, :name, nothing)
+    T = pop!(kw, :time_series_type, TimeSeriesData)
+    isnothing(name) && return _rust_has_any(owner; time_series_type = T)
+    return _rust_has_time_series(T === TimeSeriesData ? SingleTimeSeries : T, owner, name; kw...)
 end
 
 """
@@ -992,8 +956,7 @@ function has_time_series(
 ) where {T <: TimeSeriesData}
     mgr = get_time_series_manager(val)
     isnothing(mgr) && return false
-    _uses_rust_store(mgr) && return _rust_has_any(val; time_series_type = T)
-    return has_metadata(mgr.metadata_store, val; time_series_type = T)
+    return _rust_has_any(val; time_series_type = T)
 end
 
 function has_time_series(
@@ -1006,18 +969,7 @@ function has_time_series(
 ) where {T <: TimeSeriesData}
     mgr = get_time_series_manager(val)
     isnothing(mgr) && return false
-    if _uses_rust_store(mgr)
-        return _rust_has_time_series(T, val, name; resolution = resolution, features...)
-    end
-    return has_metadata(
-        mgr.metadata_store,
-        val;
-        time_series_type = T,
-        name = name,
-        resolution = resolution,
-        interval = interval,
-        features...,
-    )
+    return _rust_has_time_series(T, val, name; resolution = resolution, features...)
 end
 
 has_time_series(
@@ -1081,8 +1033,8 @@ function _copy_time_series!(
     name_mapping::Union{Nothing, Dict{Tuple{String, String}, String}} = nothing,
     scaling_factor_multiplier_mapping::Union{Nothing, Dict{String, String}} = nothing,
 )
-    storage = get_time_series_storage(dst)
-    if isnothing(storage)
+    mgr = get_time_series_manager(dst)
+    if isnothing(mgr)
         throw(
             ArgumentError(
                 "$(summary(dst)) does not have time series storage. " *
@@ -1091,9 +1043,8 @@ function _copy_time_series!(
         )
     end
 
-    mgr = get_time_series_manager(dst)
-    @assert !isnothing(mgr)
-
+    # The Rust store is content-addressed, so re-adding a reconstructed series to
+    # `dst` only creates a new association row; the underlying array is shared.
     for ts_metadata in get_time_series_metadata(src)
         name = get_name(ts_metadata)
         new_name = name
@@ -1105,21 +1056,28 @@ function _copy_time_series!(
             end
             @debug "Copy ts_metadata with" _group = LOG_GROUP_TIME_SERIES new_name
         end
-        multiplier = get_scaling_factor_multiplier(ts_metadata)
-        new_multiplier = multiplier
         if !isnothing(scaling_factor_multiplier_mapping)
-            new_multiplier = get(scaling_factor_multiplier_mapping, multiplier, nothing)
-            if isnothing(new_multiplier)
+            multiplier = get_scaling_factor_multiplier(ts_metadata)
+            if isnothing(get(scaling_factor_multiplier_mapping, multiplier, nothing))
                 @debug "Skip copying ts_metadata" _group = LOG_GROUP_TIME_SERIES multiplier
                 continue
             end
-            @debug "Copy ts_metadata with" _group = LOG_GROUP_TIME_SERIES new_multiplier
+            # scaling_factor_multiplier is not yet supported on the Rust backend, so
+            # there is nothing to remap on the reconstructed series.
         end
-        new_time_series = deepcopy(ts_metadata)
-        assign_new_uuid_internal!(new_time_series)
-        set_name!(new_time_series, new_name)
-        set_scaling_factor_multiplier!(new_time_series, new_multiplier)
-        add_metadata!(mgr.metadata_store, dst, new_time_series)
+        feats = Dict(Symbol(k) => v for (k, v) in get_features(ts_metadata))
+        ts = get_time_series(
+            time_series_metadata_to_data(ts_metadata),
+            src,
+            name;
+            resolution = get_resolution(ts_metadata),
+            feats...,
+        )
+        if new_name != name
+            ts = deepcopy(ts)
+            setproperty!(ts, :name, new_name)
+        end
+        add_time_series!(mgr, dst, ts; feats...)
     end
 end
 
@@ -1131,7 +1089,7 @@ This information can be used to call
 function get_time_series_keys(owner::TimeSeriesOwners)
     mgr = get_time_series_manager(owner)
     isnothing(mgr) && return []
-    return get_time_series_keys(mgr.metadata_store, owner)
+    return _rust_get_time_series_keys(owner)
 end
 
 function get_time_series_metadata(

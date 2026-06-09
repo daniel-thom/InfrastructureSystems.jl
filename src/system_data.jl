@@ -1,5 +1,4 @@
 
-const TIME_SERIES_STORAGE_FILE = "time_series_storage.h5"
 # Rust backend: NetCDF arrays; metadata lives beside it as `<file>.sqlite`.
 const RUST_TIME_SERIES_STORAGE_FILE = "time_series_storage.nc"
 const TIME_SERIES_DIRECTORY_ENV_VAR = "SIENNA_TIME_SERIES_DIRECTORY"
@@ -51,7 +50,6 @@ function SystemData(;
     time_series_in_memory = false,
     time_series_directory = nothing,
     compression = CompressionSettings(),
-    time_series_backend = :legacy,
 )
     validation_descriptors = if isnothing(validation_descriptor_file)
         []
@@ -63,7 +61,6 @@ function SystemData(;
         in_memory = time_series_in_memory,
         directory = time_series_directory,
         compression = compression,
-        backend = time_series_backend,
     )
     components = Components(time_series_mgr, validation_descriptors)
     supplemental_attribute_mgr = SupplementalAttributeManager()
@@ -473,8 +470,8 @@ function iterate_components_with_time_series(
 )
     return (
         get_component(data, x) for
-        x in list_owner_uuids_with_time_series(
-            data.time_series_manager.metadata_store,
+        x in _rust_list_owner_uuids(
+            data.time_series_manager.data_store,
             InfrastructureSystemsComponent;
             time_series_type = time_series_type,
             resolution = resolution,
@@ -488,8 +485,8 @@ function iterate_supplemental_attributes_with_time_series(
 )
     return (
         get_supplemental_attribute(data, x) for
-        x in list_owner_uuids_with_time_series(
-            data.time_series_manager.metadata_store,
+        x in _rust_list_owner_uuids(
+            data.time_series_manager.data_store,
             SupplementalAttribute;
             time_series_type = time_series_type,
         )
@@ -535,7 +532,7 @@ function get_time_series_multiple(
 end
 
 check_time_series_consistency(data::SystemData, ts_type) =
-    check_consistency(data.time_series_manager.metadata_store, ts_type)
+    _rust_check_consistency(data.time_series_manager.data_store, ts_type)
 
 """
 Transform all instances of SingleTimeSeries to DeterministicSingleTimeSeries.
@@ -619,6 +616,7 @@ function _transform_single_time_series!(
     if delete_existing
         remove_time_series!(data, DeterministicSingleTimeSeries; resolution = resolution)
     end
+    # Validate eligibility and cross-series consistency before committing.
     items = _check_transform_single_time_series(
         data,
         DeterministicSingleTimeSeries,
@@ -633,68 +631,31 @@ function _transform_single_time_series!(
         return
     end
 
-    all_metadata = Vector{DeterministicMetadata}(undef, length(items))
-    components = Vector{InfrastructureSystemsComponent}(undef, length(items))
-    for (i, item) in enumerate(items)
-        if i > 1
-            params1 = items[1].params
-            params = item.params
-            if params.count != params1.count
-                msg =
-                    "transform_single_time_series! with horizon = $horizon and " *
-                    "interval = $interval will produce Deterministic forecasts with " *
-                    "different values for count: $(params.count) $(params1.count)"
-                throw(ConflictingInputsError(msg))
-            end
-            if params.initial_timestamp != params1.initial_timestamp
-                msg =
-                    "transform_single_time_series! is not supported when " *
-                    "SingleTimeSeries have different initial timestamps: " *
-                    "$(params.initial_timestamp) $(params1.initial_timestamp)"
-                throw(ConflictingInputsError(msg))
-            end
+    for i in 2:length(items)
+        params1 = items[1].params
+        params = items[i].params
+        if params.count != params1.count
+            throw(ConflictingInputsError(
+                "transform_single_time_series! with horizon = $horizon and " *
+                "interval = $interval will produce Deterministic forecasts with " *
+                "different values for count: $(params.count) $(params1.count)"))
         end
-        metadata = item.metadata
-        params = item.params
-        new_metadata = DeterministicMetadata(;
-            name = get_name(metadata),
-            resolution = get_resolution(metadata),
-            initial_timestamp = params.initial_timestamp,
-            interval = params.interval,
-            count = params.count,
-            time_series_uuid = get_time_series_uuid(metadata),
-            horizon = params.horizon,
-            time_series_type = DeterministicSingleTimeSeries,
-            scaling_factor_multiplier = get_scaling_factor_multiplier(metadata),
-            internal = InfrastructureSystemsInternal(),
-        )
-        all_metadata[i] = new_metadata
-        components[i] = item.component
+        if params.initial_timestamp != params1.initial_timestamp
+            throw(ConflictingInputsError(
+                "transform_single_time_series! is not supported when " *
+                "SingleTimeSeries have different initial timestamps: " *
+                "$(params.initial_timestamp) $(params1.initial_timestamp)"))
+        end
     end
 
-    try
-        begin_time_series_update(data.time_series_manager) do
-            for (component, metadata) in zip(components, all_metadata)
-                add_metadata!(data.time_series_manager.metadata_store, component, metadata)
-            end
-        end
-    catch
-        # Only remove the metadata entries that were added in this batch so that
-        # pre-existing DeterministicSingleTimeSeries from prior calls are preserved.
-        for (component, metadata) in zip(components, all_metadata)
-            try
-                remove_metadata!(
-                    data.time_series_manager.metadata_store,
-                    component,
-                    metadata,
-                )
-            catch ex
-                # The entry may not have been added yet; ignore.
-                ex isa ErrorException || rethrow()
-            end
-        end
-        rethrow()
-    end
+    # The Rust store derives a DeterministicSingleTimeSeries view over every
+    # stored SingleTimeSeries that shares the array (no data is copied); the
+    # window parameters are recorded in the metadata.
+    TSS.transform_single_time_series!(
+        data.time_series_manager.data_store.inner,
+        horizon,
+        interval,
+    )
     return
 end
 
@@ -715,8 +676,8 @@ function _check_transform_single_time_series(
     resolution::Union{Nothing, Dates.Period};
     skip_existing::Bool = false,
 )
-    items = list_metadata_with_owner_uuid(
-        data.time_series_manager.metadata_store,
+    items = _rust_list_metadata_with_owner(
+        data.time_series_manager.data_store,
         InfrastructureSystemsComponent;
         time_series_type = SingleTimeSeries,
         resolution = resolution,
@@ -730,7 +691,7 @@ function _check_transform_single_time_series(
             interval,
         )
         system_params = get_forecast_parameters(
-            data.time_series_manager.metadata_store;
+            data;
             resolution = params.resolution,
             interval = params.interval,
         )
@@ -751,7 +712,7 @@ function _check_transform_single_time_series(
         ts_features = get_features(item.metadata)
         ts_features_symbols = Dict{Symbol, Any}(Symbol(k) => v for (k, v) in ts_features)
         existing_det = list_metadata(
-            data.time_series_manager.metadata_store,
+            data.time_series_manager,
             component;
             time_series_type = Deterministic,
             name = ts_name,
@@ -773,7 +734,7 @@ function _check_transform_single_time_series(
         # horizon, and interval.
         if skip_existing
             existing = list_metadata(
-                data.time_series_manager.metadata_store,
+                data.time_series_manager,
                 component;
                 time_series_type = DeterministicSingleTimeSeries,
                 name = ts_name,
@@ -900,9 +861,11 @@ function prepare_for_serialization_to_file!(
     end
 
     sys_base = _get_system_basename(filename)
+    ts_base = joinpath(directory, _get_secondary_basename(sys_base, RUST_TIME_SERIES_STORAGE_FILE))
     files = [
         filename,
-        joinpath(directory, _get_secondary_basename(sys_base, TIME_SERIES_STORAGE_FILE)),
+        ts_base,                # NetCDF arrays
+        ts_base * ".sqlite",    # sidecar metadata
     ]
     for file in files
         if !force && isfile(file)
@@ -964,26 +927,19 @@ function serialize(data::SystemData)
             directory = metadata["serialization_directory"]
             base = metadata["basename"]
 
-            if isempty(data.time_series_manager.data_store)
+            store = data.time_series_manager.data_store
+            if isempty(store)
                 json_data["time_series_compression_enabled"] =
-                    get_compression_settings(data.time_series_manager.data_store).enabled
-                json_data["time_series_in_memory"] =
-                    data.time_series_manager.data_store isa InMemoryTimeSeriesStorage
-            elseif _uses_rust_store(data.time_series_manager)
-                # Rust backend: write the .nc arrays + standalone .sqlite metadata
-                # (no HDF5, no embedded SQLite blob).
+                    get_compression_settings(store).enabled
+                json_data["time_series_in_memory"] = isnothing(store.path)
+            else
+                # Rust backend: write the .nc arrays + standalone .sqlite metadata.
                 time_series_base_name =
                     _get_secondary_basename(base, RUST_TIME_SERIES_STORAGE_FILE)
                 time_series_storage_file = joinpath(directory, time_series_base_name)
-                serialize(data.time_series_manager.data_store, time_series_storage_file)
+                serialize(store, time_series_storage_file)
                 json_data["time_series_storage_file"] = time_series_base_name
                 json_data["time_series_storage_type"] = "RustTimeSeriesStore"
-            else
-                error(
-                    "Serializing a non-empty $(typeof(data.time_series_manager.data_store)) " *
-                    "system to disk is no longer supported (HDF5 storage was removed). " *
-                    "Create the system with `time_series_backend = :rust` for persistence.",
-                )
             end
         end
         pop!(json_data["internal"]["ext"], SERIALIZATION_METADATA_KEY, nothing)
@@ -1007,11 +963,12 @@ function deserialize(
         if !isfile(raw["time_series_storage_file"])
             error("time series file $(raw["time_series_storage_file"]) does not exist")
         end
-        # Rust backend: open the .nc + sidecar .sqlite directly (no HDF5).
-        time_series_storage =
-            open_rust_store(raw["time_series_storage_file"];
-                read_only = time_series_read_only)
-        time_series_metadata_store = nothing
+        # Rust backend: open the .nc + sidecar .sqlite directly.
+        time_series_manager = TimeSeriesManager(;
+            data_store = open_rust_store(raw["time_series_storage_file"];
+                read_only = time_series_read_only),
+            read_only = time_series_read_only,
+        )
     elseif haskey(raw, "time_series_storage_file")
         error(
             "This system was serialized with the legacy HDF5 time series storage " *
@@ -1019,20 +976,17 @@ function deserialize(
             "longer supported. HDF5 storage has been removed in favor of the Rust backend.",
         )
     else
-        time_series_storage = make_time_series_storage(;
+        # The serialized store was empty; create a fresh Rust store honoring the
+        # recorded in-memory flag and compression setting.
+        time_series_manager = TimeSeriesManager(;
+            in_memory = get(raw, "time_series_in_memory", true),
+            directory = time_series_directory,
+            read_only = time_series_read_only,
             compression = CompressionSettings(;
                 enabled = get(raw, "time_series_compression_enabled", DEFAULT_COMPRESSION),
             ),
-            directory = time_series_directory,
         )
-        time_series_metadata_store = nothing
     end
-
-    time_series_manager = TimeSeriesManager(;
-        data_store = time_series_storage,
-        read_only = time_series_read_only,
-        metadata_store = time_series_metadata_store,
-    )
     subsystems = Dict(k => Set(Base.UUID.(v)) for (k, v) in raw["subsystems"])
     supplemental_attribute_manager = deserialize(
         SupplementalAttributeManager,
@@ -1330,22 +1284,43 @@ function get_masked_component(data::SystemData, uuid::Base.UUID)
     return nothing
 end
 
-get_forecast_initial_times(data::SystemData; kwargs...) =
-    get_forecast_initial_times(data.time_series_manager.metadata_store; kwargs...)
-get_forecast_window_count(data::SystemData; kwargs...) =
-    get_forecast_window_count(data.time_series_manager.metadata_store; kwargs...)
-get_forecast_horizon(data::SystemData; kwargs...) =
-    get_forecast_horizon(data.time_series_manager.metadata_store; kwargs...)
-get_forecast_initial_timestamp(data::SystemData; kwargs...) =
-    get_forecast_initial_timestamp(data.time_series_manager.metadata_store; kwargs...)
-get_forecast_interval(data::SystemData; kwargs...) =
-    get_forecast_interval(data.time_series_manager.metadata_store; kwargs...)
+get_forecast_parameters(
+    data::SystemData;
+    resolution::Union{Nothing, Dates.Period} = nothing,
+    interval::Union{Nothing, Dates.Period} = nothing,
+) = _rust_forecast_parameters(
+    data.time_series_manager.data_store;
+    resolution = resolution,
+    interval = interval,
+)
+
+function get_forecast_initial_times(data::SystemData; kwargs...)
+    params = get_forecast_parameters(data; kwargs...)
+    isnothing(params) && return []
+    return get_initial_times(params.initial_timestamp, params.count, params.interval)
+end
+function get_forecast_window_count(data::SystemData; kwargs...)
+    params = get_forecast_parameters(data; kwargs...)
+    return isnothing(params) ? nothing : params.count
+end
+function get_forecast_horizon(data::SystemData; kwargs...)
+    params = get_forecast_parameters(data; kwargs...)
+    return isnothing(params) ? nothing : params.horizon
+end
+function get_forecast_initial_timestamp(data::SystemData; kwargs...)
+    params = get_forecast_parameters(data; kwargs...)
+    return isnothing(params) ? nothing : params.initial_timestamp
+end
+function get_forecast_interval(data::SystemData; kwargs...)
+    params = get_forecast_parameters(data; kwargs...)
+    return isnothing(params) ? nothing : params.interval
+end
 
 get_time_series_resolutions(
     data::SystemData;
     time_series_type::Union{Type{<:TimeSeriesData}, Nothing} = nothing,
-) = get_time_series_resolutions(
-    data.time_series_manager.metadata_store;
+) = _rust_get_time_series_resolutions(
+    data.time_series_manager.data_store;
     time_series_type = time_series_type,
 )
 
@@ -1354,11 +1329,7 @@ function get_forecast_total_period(
     resolution::Union{Nothing, Dates.Period} = nothing,
     interval::Union{Nothing, Dates.Period} = nothing,
 )
-    params = get_forecast_parameters(
-        data.time_series_manager.metadata_store;
-        resolution = resolution,
-        interval = interval,
-    )
+    params = get_forecast_parameters(data; resolution = resolution, interval = interval)
     isnothing(params) && return Dates.Second(0)
     return get_total_period(
         params.initial_timestamp,
@@ -1405,26 +1376,22 @@ get_num_components_with_supplemental_attributes(data::SystemData) =
     get_num_components_with_attributes(data.supplemental_attribute_manager.associations)
 
 get_num_time_series(data::SystemData) =
-    get_num_time_series(data.time_series_manager.metadata_store)
+    _rust_get_num_time_series(data.time_series_manager.data_store)
 function get_time_series_counts(data::SystemData)
-    mgr = data.time_series_manager
-    if _uses_rust_store(mgr)
-        c = get_counts(mgr.data_store)
-        return TimeSeriesCounts(;
-            components_with_time_series = c.components_with_time_series,
-            supplemental_attributes_with_time_series = 0,
-            static_time_series_count = c.static_time_series,
-            forecast_count = c.forecasts,
-        )
-    end
-    return get_time_series_counts(mgr.metadata_store)
+    c = get_counts(data.time_series_manager.data_store)
+    return TimeSeriesCounts(;
+        components_with_time_series = c.components_with_time_series,
+        supplemental_attributes_with_time_series = 0,
+        static_time_series_count = c.static_time_series,
+        forecast_count = c.forecasts,
+    )
 end
 get_time_series_counts_by_type(data::SystemData) =
-    get_time_series_counts_by_type(data.time_series_manager.metadata_store)
+    _rust_get_time_series_counts_by_type(data.time_series_manager.data_store)
 get_static_time_series_summary_table(data::SystemData) =
-    get_static_time_series_summary_table(data.time_series_manager.metadata_store)
+    _rust_static_summary_table(data.time_series_manager.data_store)
 get_forecast_summary_table(data::SystemData) =
-    get_forecast_summary_table(data.time_series_manager.metadata_store)
+    _rust_forecast_summary_table(data.time_series_manager.data_store)
 
 _get_system_basename(system_file) = splitext(basename(system_file))[1]
 _get_secondary_basename(system_basename, name) = system_basename * "_" * name
@@ -1494,7 +1461,7 @@ clear_supplemental_attributes!(data::SystemData) =
     clear_supplemental_attributes!(data.supplemental_attribute_manager)
 
 stores_time_series_in_memory(data::SystemData) =
-    data.time_series_manager.data_store isa InMemoryTimeSeriesStorage
+    isnothing(data.time_series_manager.data_store.path)
 
 """
 Make a `deepcopy` of a [`SystemData`](@ref) more quickly by skipping the copying of time
@@ -1522,7 +1489,7 @@ function fast_deepcopy_system(
     old_supplemental_attribute_manager = data.supplemental_attribute_manager
 
     new_time_series_manager = if skip_time_series
-        TimeSeriesManager(InMemoryTimeSeriesStorage(), TimeSeriesMetadataStore(), true, nothing)
+        TimeSeriesManager(; in_memory = true, read_only = true)
     else
         old_time_series_manager
     end

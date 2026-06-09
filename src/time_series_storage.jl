@@ -1,16 +1,8 @@
 
 """
-Abstract type for time series storage implementations.
-
-All subtypes must implement:
-
-  - `clear_time_series!`
-  - `deserialize_time_series`
-  - `get_compression_settings`
-  - `get_num_time_series`
-  - `remove_time_series!`
-  - `serialize_time_series!`
-  - `Base.isempty`
+Abstract type for time series storage implementations. The only concrete subtype
+is [`RustTimeSeriesStore`](@ref), which delegates both array data and metadata to
+the external `time-series-store` engine.
 """
 abstract type TimeSeriesStorage end
 
@@ -67,21 +59,9 @@ function CompressionSettings(;
     return CompressionSettings(enabled, type, level, shuffle)
 end
 
-function make_time_series_storage(;
-    in_memory = false,
-    filename = nothing,
-    directory = nothing,
-    compression = CompressionSettings(),
-)
-    # HDF5 storage has been removed. The in-memory store is the only pure-Julia
-    # backend; on-disk persistence is provided by the Rust backend
-    # (`RustTimeSeriesStore`, selected with `backend = :rust`).
-    return InMemoryTimeSeriesStorage()
-end
-
 """
-Open the storage for a batch of operations. The in-memory and Rust backends have
-no file handle to manage, so this just runs `func`.
+Open the storage for a batch of operations. The Rust backend has no file handle
+to manage at this layer, so this just runs `func`.
 """
 function open_store!(
     func::Function,
@@ -102,11 +82,4 @@ function deserialize_component_name(component_name::AbstractString)
     component = UUIDs.UUID(data[1])
     name = data[2]
     return component, name
-end
-
-function serialize(storage::TimeSeriesStorage, file_path::AbstractString)
-    error(
-        "Serializing $(typeof(storage)) time series to disk is no longer supported. " *
-        "Use the Rust time series backend (`backend = :rust`) for persistence.",
-    )
 end

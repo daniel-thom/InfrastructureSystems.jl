@@ -6,7 +6,7 @@ function assign_new_uuid_internal!(component::InfrastructureSystemsComponent)
     new_uuid = make_uuid()
     mgr = get_time_series_manager(component)
     if !isnothing(mgr)
-        replace_component_uuid!(mgr.metadata_store, old_uuid, new_uuid)
+        _rust_replace_component_uuid!(mgr.data_store, old_uuid, new_uuid)
     end
 
     associations = _get_supplemental_attribute_associations(component)

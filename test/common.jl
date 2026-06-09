@@ -59,11 +59,9 @@ end
 
 function create_system_data_shared_time_series(;
     time_series_in_memory = false,
-    time_series_backend = :legacy,
 )
     data = IS.SystemData(;
         time_series_in_memory = time_series_in_memory,
-        time_series_backend = time_series_backend,
     )
 
     name1 = "Component1"

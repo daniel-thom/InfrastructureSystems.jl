@@ -223,11 +223,10 @@ end
     @test IS.get_compression_settings(IS.SystemData()) == none
     @test IS.get_compression_settings(IS.SystemData(; time_series_in_memory = true)) ==
           none
-    # Compression was an HDF5 feature; the in-memory backend (the only non-Rust
-    # backend after HDF5 removal) does not apply a requested compression setting.
+    # The Rust backend honors the requested compression policy (DEFLATE).
     settings =
         IS.CompressionSettings(; enabled = true, type = IS.CompressionTypes.DEFLATE)
-    @test IS.get_compression_settings(IS.SystemData(; compression = settings)) == none
+    @test IS.get_compression_settings(IS.SystemData(; compression = settings)) == settings
 end
 
 @testset "Test single time series consistency" begin
@@ -576,10 +575,9 @@ end
 @testset "Test bulk add of time series" begin
     for in_memory in (false, true)
         sys = IS.SystemData(; time_series_in_memory = in_memory)
-        # Without HDF5, the only non-Rust backend is in-memory, so the
-        # `time_series_in_memory` flag no longer selects on-disk storage; on-disk
-        # persistence is `time_series_backend = :rust`.
-        @test IS.stores_time_series_in_memory(sys)
+        # The Rust backend honors `time_series_in_memory`: in-memory keeps the
+        # store handle off-disk, otherwise it writes a `.nc` (+ `.sqlite`) pair.
+        @test IS.stores_time_series_in_memory(sys) == in_memory
         initial_time = Dates.DateTime("2020-09-01")
         resolution = Dates.Hour(1)
         len = 24
