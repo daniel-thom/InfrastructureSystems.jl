@@ -70,7 +70,8 @@ function get_time_series(
     TimerOutputs.@timeit_debug SYSTEM_TIMERS "get_time_series" begin
         return _rust_get_time_series(
             T, owner, name;
-            start_time = start_time, len = len, resolution = resolution, features...,
+            start_time = start_time, len = len, count = count,
+            resolution = resolution, features...,
         )
     end
 end
@@ -944,7 +945,12 @@ function has_time_series(owner::TimeSeriesOwners; kwargs...)
     name = pop!(kw, :name, nothing)
     T = pop!(kw, :time_series_type, TimeSeriesData)
     isnothing(name) && return _rust_has_any(owner; time_series_type = T)
-    return _rust_has_time_series(T === TimeSeriesData ? SingleTimeSeries : T, owner, name; kw...)
+    return _rust_has_time_series(
+        T === TimeSeriesData ? SingleTimeSeries : T,
+        owner,
+        name;
+        kw...,
+    )
 end
 
 """

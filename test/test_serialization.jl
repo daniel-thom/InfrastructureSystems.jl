@@ -163,32 +163,35 @@ end
     if !rust_ts_available()
         @test_skip false  # on-disk serialization needs the Rust backend
     else
-    sys = IS.SystemData()
-    initial_time = Dates.DateTime("2020-09-01")
-    resolution = Dates.Hour(1)
-    ta = TimeSeries.TimeArray(range(initial_time; length = 24, step = resolution), rand(24))
-    ts = IS.SingleTimeSeries(; data = ta, name = "test")
-    geo = IS.GeographicInfo(; geo_json = Dict("x" => 1.0, "y" => 2.0))
+        sys = IS.SystemData()
+        initial_time = Dates.DateTime("2020-09-01")
+        resolution = Dates.Hour(1)
+        ta = TimeSeries.TimeArray(
+            range(initial_time; length = 24, step = resolution),
+            rand(24),
+        )
+        ts = IS.SingleTimeSeries(; data = ta, name = "test")
+        geo = IS.GeographicInfo(; geo_json = Dict("x" => 1.0, "y" => 2.0))
 
-    for i in 1:2
-        name = "component_$(i)"
-        component = IS.TestComponent(name, 5)
-        IS.add_component!(sys, component)
-        attr = IS.TestSupplemental(; value = Float64(i))
-        IS.add_supplemental_attribute!(sys, component, attr)
-        IS.add_time_series!(sys, attr, ts)
-        IS.add_supplemental_attribute!(sys, component, geo)
-    end
+        for i in 1:2
+            name = "component_$(i)"
+            component = IS.TestComponent(name, 5)
+            IS.add_component!(sys, component)
+            attr = IS.TestSupplemental(; value = Float64(i))
+            IS.add_supplemental_attribute!(sys, component, attr)
+            IS.add_time_series!(sys, attr, ts)
+            IS.add_supplemental_attribute!(sys, component, geo)
+        end
 
-    sys2, result = validate_serialization(sys)
-    @test result
-    attrs = collect(IS.get_supplemental_attributes(IS.TestSupplemental, sys2))
-    @test length(attrs) == 2
-    for attr in attrs
-        @test IS.has_time_series(IS.SingleTimeSeries, attr)
-        ts2 = IS.get_time_series(IS.SingleTimeSeries, attr, "test")
-        @test ts2.data == ta
-    end
+        sys2, result = validate_serialization(sys)
+        @test result
+        attrs = collect(IS.get_supplemental_attributes(IS.TestSupplemental, sys2))
+        @test length(attrs) == 2
+        for attr in attrs
+            @test IS.has_time_series(IS.SingleTimeSeries, attr)
+            ts2 = IS.get_time_series(IS.SingleTimeSeries, attr, "test")
+            @test ts2.data == ta
+        end
     end
 end
 

@@ -31,7 +31,11 @@ function TimeSeriesManager(;
             joinpath(dir, string(UUIDs.uuid4()) * "_time_series.nc")
         end
         data_store =
-            RustTimeSeriesStore(; in_memory = in_memory, path = path, compression = compression)
+            RustTimeSeriesStore(;
+                in_memory = in_memory,
+                path = path,
+                compression = compression,
+            )
     end
     return TimeSeriesManager(data_store, read_only)
 end
@@ -45,20 +49,49 @@ function _rust_owner_args(owner::TimeSeriesOwners)
     )
 end
 
-_rust_features(features) = Dict{String, Any}(string(k) => v for (k, v) in features)
+function _rust_features(features)
+    out = Dict{String, Any}()
+    for (k, v) in features
+        v isa Union{Bool, Real, AbstractString} || throw(
+            ArgumentError(
+                "time series feature `$k` must be a Bool, Real, or String, got $(typeof(v))",
+            ),
+        )
+        out[string(k)] = v
+    end
+    return out
+end
 
 """
 Begin an update of time series. Use this function when adding many time series arrays
 in order to improve performance by amortizing store flushes across the batch.
+
+If an error occurs during the update, time series added within it are rolled back.
 """
 function begin_time_series_update(
     func::Function,
     mgr::TimeSeriesManager,
 )
-    open_store!(mgr.data_store, "r+") do
-        func()
+    store = mgr.data_store
+    before = Set(_rust_row_identity(r) for r in TSS.list_metadata(store.inner))
+    try
+        open_store!(store, "r+") do
+            func()
+        end
+        flush!(store)
+    catch
+        # Roll back: remove associations added during this update so the store is
+        # left consistent with its pre-update state.
+        for row in TSS.list_metadata(store.inner)
+            _rust_row_identity(row) in before && continue
+            try
+                _rust_remove_row!(store, row)
+            catch
+                # Best-effort cleanup; ignore rows already gone.
+            end
+        end
+        rethrow()
     end
-    flush!(mgr.data_store)
     return
 end
 
@@ -154,30 +187,37 @@ function remove_time_series!(
     features...,
 )
     _throw_if_read_only(mgr)
+    store = mgr.data_store
     owner_uuid, _, _ = _rust_owner_args(owner)
-    feats = _rust_features(features)
-    if time_series_type <: SingleTimeSeries
-        # A DeterministicSingleTimeSeries shares the underlying SingleTimeSeries
-        # array, so the base series cannot be removed while a DST references it.
-        if has_typed(mgr.data_store, owner_uuid, name, TSS.TS_TYPE_DETERMINISTIC_SINGLE;
-            resolution = resolution, features = feats)
-            throw(ArgumentError(
-                "Cannot remove SingleTimeSeries '$name' because it is attached to a " *
-                "DeterministicSingleTimeSeries."))
-        end
-        remove_single!(mgr.data_store, owner_uuid, name;
-            resolution = resolution, features = feats)
-    elseif time_series_type <: Forecast
-        for tt in (TSS.TS_TYPE_DETERMINISTIC, TSS.TS_TYPE_DETERMINISTIC_SINGLE,
-            TSS.TS_TYPE_PROBABILISTIC, TSS.TS_TYPE_SCENARIOS)
-            if has_typed(mgr.data_store, owner_uuid, name, tt;
-                resolution = resolution, features = feats)
-                remove_typed!(mgr.data_store, owner_uuid, name, tt;
-                    resolution = resolution, features = feats)
+    # Subset (partial) feature/resolution matching: remove every stored series of
+    # type `time_series_type` that contains at least the requested features.
+    for metadata in _rust_owner_list_metadata(owner;
+        time_series_type = time_series_type, name = name, resolution = resolution,
+        features...)
+        mt = time_series_metadata_to_data(metadata)
+        res = get_resolution(metadata)
+        feats = _rust_features((Symbol(k) => v for (k, v) in get_features(metadata)))
+        if mt <: SingleTimeSeries
+            # A DeterministicSingleTimeSeries shares the underlying SingleTimeSeries
+            # array, so the base series cannot be removed if doing so would orphan a
+            # DST — i.e. a DST references the array and this is its last backing
+            # SingleTimeSeries. Other components sharing the array make removal safe.
+            hash =
+                get_metadata(store, owner_uuid, name;
+                    resolution = res, features = feats).data_hash
+            c = _rust_array_sts_dst_counts(store, hash)
+            if c.dst >= 1 && c.sts <= 1
+                throw(
+                    ArgumentError(
+                        "Cannot remove SingleTimeSeries '$name' because it is attached to a " *
+                        "DeterministicSingleTimeSeries."),
+                )
             end
+            remove_single!(store, owner_uuid, name; resolution = res, features = feats)
+        else
+            remove_typed!(store, owner_uuid, name, _rust_ts_code(mt);
+                resolution = res, features = feats)
         end
-    else
-        error("Rust backend does not support $time_series_type")
     end
     return
 end

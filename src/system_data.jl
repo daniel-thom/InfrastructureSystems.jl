@@ -635,26 +635,33 @@ function _transform_single_time_series!(
         params1 = items[1].params
         params = items[i].params
         if params.count != params1.count
-            throw(ConflictingInputsError(
-                "transform_single_time_series! with horizon = $horizon and " *
-                "interval = $interval will produce Deterministic forecasts with " *
-                "different values for count: $(params.count) $(params1.count)"))
+            throw(
+                ConflictingInputsError(
+                    "transform_single_time_series! with horizon = $horizon and " *
+                    "interval = $interval will produce Deterministic forecasts with " *
+                    "different values for count: $(params.count) $(params1.count)"),
+            )
         end
         if params.initial_timestamp != params1.initial_timestamp
-            throw(ConflictingInputsError(
-                "transform_single_time_series! is not supported when " *
-                "SingleTimeSeries have different initial timestamps: " *
-                "$(params.initial_timestamp) $(params1.initial_timestamp)"))
+            throw(
+                ConflictingInputsError(
+                    "transform_single_time_series! is not supported when " *
+                    "SingleTimeSeries have different initial timestamps: " *
+                    "$(params.initial_timestamp) $(params1.initial_timestamp)"),
+            )
         end
     end
 
     # The Rust store derives a DeterministicSingleTimeSeries view over every
-    # stored SingleTimeSeries that shares the array (no data is copied); the
-    # window parameters are recorded in the metadata.
+    # stored component SingleTimeSeries that shares the array (no data is copied);
+    # the window parameters are recorded in the metadata. Supplemental-attribute
+    # series are left untouched, matching the metadata-store behavior.
     TSS.transform_single_time_series!(
         data.time_series_manager.data_store.inner,
         horizon,
-        interval,
+        interval;
+        owner_category = TSS.Component,
+        resolution = resolution,
     )
     return
 end
@@ -861,7 +868,10 @@ function prepare_for_serialization_to_file!(
     end
 
     sys_base = _get_system_basename(filename)
-    ts_base = joinpath(directory, _get_secondary_basename(sys_base, RUST_TIME_SERIES_STORAGE_FILE))
+    ts_base = joinpath(
+        directory,
+        _get_secondary_basename(sys_base, RUST_TIME_SERIES_STORAGE_FILE),
+    )
     files = [
         filename,
         ts_base,                # NetCDF arrays
@@ -1378,12 +1388,12 @@ get_num_components_with_supplemental_attributes(data::SystemData) =
 get_num_time_series(data::SystemData) =
     _rust_get_num_time_series(data.time_series_manager.data_store)
 function get_time_series_counts(data::SystemData)
-    c = get_counts(data.time_series_manager.data_store)
+    c = _rust_time_series_counts(data.time_series_manager.data_store)
     return TimeSeriesCounts(;
         components_with_time_series = c.components_with_time_series,
-        supplemental_attributes_with_time_series = 0,
-        static_time_series_count = c.static_time_series,
-        forecast_count = c.forecasts,
+        supplemental_attributes_with_time_series = c.supplemental_attributes_with_time_series,
+        static_time_series_count = c.static_time_series_count,
+        forecast_count = c.forecast_count,
     )
 end
 get_time_series_counts_by_type(data::SystemData) =
