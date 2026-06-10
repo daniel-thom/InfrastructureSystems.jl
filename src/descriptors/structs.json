@@ -44,12 +44,6 @@
           "comment": "Type of the time series data associated with this metadata."
         },
         {
-          "name": "scaling_factor_multiplier",
-          "data_type": "Union{Nothing, Function}",
-          "default": "nothing",
-          "comment": "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
-        },
-        {
           "name": "features",
           "data_type": "Dict{String, Union{Bool, Int, String}}",
           "comment": "User-defined tags that differentiate multiple time series arrays that represent the same component attribute, such as different arrays for different scenarios or years.",
@@ -105,12 +99,6 @@
           "name": "horizon",
           "data_type": "Dates.Period",
           "comment": "length of this time series"
-        },
-        {
-          "name": "scaling_factor_multiplier",
-          "data_type": "Union{Nothing, Function}",
-          "default": "nothing",
-          "comment": "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
         },
         {
           "name": "features",
@@ -170,12 +158,6 @@
           "comment": "length of this time series"
         },
         {
-          "name": "scaling_factor_multiplier",
-          "data_type": "Union{Nothing, Function}",
-          "default": "nothing",
-          "comment": "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
-        },
-        {
           "name": "features",
           "data_type": "Dict{String, Union{Bool, Int, String}}",
           "comment": "User-defined tags that differentiate multiple time series arrays that represent the same component attribute, such as different arrays for different scenarios or years.",
@@ -216,12 +198,6 @@
           "name": "length",
           "data_type": "Int",
           "comment": "length of this time series"
-        },
-        {
-          "name": "scaling_factor_multiplier",
-          "data_type": "Union{Nothing, Function}",
-          "default": "nothing",
-          "comment": "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
         },
         {
           "name": "features",

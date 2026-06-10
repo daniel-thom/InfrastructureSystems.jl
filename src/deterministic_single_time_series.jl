@@ -100,8 +100,6 @@ Set [`DeterministicSingleTimeSeries`](@ref) `horizon`.
 set_horizon!(value::DeterministicSingleTimeSeries, val) = value.horizon = val
 
 eltype_data(ts::DeterministicSingleTimeSeries) = eltype_data(ts.single_time_series)
-get_scaling_factor_multiplier(ts::DeterministicSingleTimeSeries) =
-    get_scaling_factor_multiplier(ts.single_time_series)
 
 function get_array_for_hdf(forecast::DeterministicSingleTimeSeries)
     return get_array_for_hdf(forecast.single_time_series)

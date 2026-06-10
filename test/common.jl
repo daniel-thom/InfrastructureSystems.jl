@@ -27,7 +27,6 @@ function create_system_data(;
             data = fdata,
             name = name,
             resolution = resolution,
-            scaling_factor_multiplier = IS.get_val,
         )
         IS.add_time_series!(data, component, forecast)
 

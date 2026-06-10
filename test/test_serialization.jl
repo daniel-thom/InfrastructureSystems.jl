@@ -272,8 +272,8 @@ end
 
 @testset "Test serialization of deserialized system" begin
     if rust_ts_available()
-        # create_system_data adds a Deterministic with a scaling_factor_multiplier,
-        # now supported on the Rust path; verify a deserialized system re-serializes.
+        # create_system_data adds a Deterministic on the Rust path; verify a
+        # deserialized system re-serializes.
         sys = create_system_data(; with_time_series = true)
         sys2, result = validate_serialization(sys)
         @test result

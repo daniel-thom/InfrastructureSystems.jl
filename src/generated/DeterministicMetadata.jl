@@ -14,7 +14,6 @@ This file is auto-generated. Do not edit.
         time_series_uuid::UUIDs.UUID
         horizon::Dates.Period
         time_series_type::Type{<:AbstractDeterministic}
-        scaling_factor_multiplier::Union{Nothing, Function}
         features::Dict{String, Union{Bool, Int, String}}
         internal::InfrastructureSystemsInternal
     end
@@ -30,7 +29,6 @@ A deterministic forecast for a particular data field in a Component.
 - `time_series_uuid::UUIDs.UUID`: reference to time series data
 - `horizon::Dates.Period`: length of this time series
 - `time_series_type::Type{<:AbstractDeterministic}`: Type of the time series data associated with this metadata.
-- `scaling_factor_multiplier::Union{Nothing, Function}`: (default: `nothing`) Applicable when the time series data are scaling factors. Called on the associated component to convert the values.
 - `features::Dict{String, Union{Bool, Int, String}}`: (default: `Dict{String, Any}()`) User-defined tags that differentiate multiple time series arrays that represent the same component attribute, such as different arrays for different scenarios or years.
 - `internal::InfrastructureSystemsInternal`:
 """
@@ -50,19 +48,17 @@ mutable struct DeterministicMetadata <: ForecastMetadata
     horizon::Dates.Period
     "Type of the time series data associated with this metadata."
     time_series_type::Type{<:AbstractDeterministic}
-    "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
-    scaling_factor_multiplier::Union{Nothing, Function}
     "User-defined tags that differentiate multiple time series arrays that represent the same component attribute, such as different arrays for different scenarios or years."
     features::Dict{String, Union{Bool, Int, String}}
     internal::InfrastructureSystemsInternal
 end
 
-function DeterministicMetadata(name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, scaling_factor_multiplier=nothing, features=Dict{String, Any}(), )
-    DeterministicMetadata(name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, scaling_factor_multiplier, features, InfrastructureSystemsInternal(), )
+function DeterministicMetadata(name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, features=Dict{String, Any}(), )
+    DeterministicMetadata(name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, features, InfrastructureSystemsInternal(), )
 end
 
-function DeterministicMetadata(; name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, scaling_factor_multiplier=nothing, features=Dict{String, Any}(), internal=InfrastructureSystemsInternal(), )
-    DeterministicMetadata(name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, scaling_factor_multiplier, features, internal, )
+function DeterministicMetadata(; name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, features=Dict{String, Any}(), internal=InfrastructureSystemsInternal(), )
+    DeterministicMetadata(name, resolution, initial_timestamp, interval, count, time_series_uuid, horizon, time_series_type, features, internal, )
 end
 
 """Get [`DeterministicMetadata`](@ref) `name`."""
@@ -81,8 +77,6 @@ get_time_series_uuid(value::DeterministicMetadata) = value.time_series_uuid
 get_horizon(value::DeterministicMetadata) = value.horizon
 """Get [`DeterministicMetadata`](@ref) `time_series_type`."""
 get_time_series_type(value::DeterministicMetadata) = value.time_series_type
-"""Get [`DeterministicMetadata`](@ref) `scaling_factor_multiplier`."""
-get_scaling_factor_multiplier(value::DeterministicMetadata) = value.scaling_factor_multiplier
 """Get [`DeterministicMetadata`](@ref) `features`."""
 get_features(value::DeterministicMetadata) = value.features
 """Get [`DeterministicMetadata`](@ref) `internal`."""
@@ -104,8 +98,6 @@ set_time_series_uuid!(value::DeterministicMetadata, val) = value.time_series_uui
 set_horizon!(value::DeterministicMetadata, val) = value.horizon = val
 """Set [`DeterministicMetadata`](@ref) `time_series_type`."""
 set_time_series_type!(value::DeterministicMetadata, val) = value.time_series_type = val
-"""Set [`DeterministicMetadata`](@ref) `scaling_factor_multiplier`."""
-set_scaling_factor_multiplier!(value::DeterministicMetadata, val) = value.scaling_factor_multiplier = val
 """Set [`DeterministicMetadata`](@ref) `features`."""
 set_features!(value::DeterministicMetadata, val) = value.features = val
 """Set [`DeterministicMetadata`](@ref) `internal`."""

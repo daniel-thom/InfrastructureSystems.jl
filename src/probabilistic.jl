@@ -5,7 +5,6 @@
         interval::Dates.Period
         percentiles::Vector{Float64}
         data::SortedDict
-        scaling_factor_multiplier::Union{Nothing, Function}
         internal::InfrastructureSystemsInternal
     end
 
@@ -18,8 +17,6 @@ A Probabilistic forecast for a particular data field in a Component.
   - `interval::Dates.Period`: forecast interval
   - `percentiles::Vector{Float64}`: Percentiles for the probabilistic forecast
   - `data::SortedDict`: timestamp - scalingfactor
-  - `scaling_factor_multiplier::Union{Nothing, Function}`: Applicable when the time series
-    data are scaling factors. Called on the associated component to convert the values.
   - `internal::InfrastructureSystemsInternal`
 """
 mutable struct Probabilistic <: Forecast
@@ -33,8 +30,6 @@ mutable struct Probabilistic <: Forecast
     resolution::Dates.Period
     "forecast interval"
     interval::Dates.Period
-    "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
-    scaling_factor_multiplier::Union{Nothing, Function}
     internal::InfrastructureSystemsInternal
 end
 
@@ -44,7 +39,6 @@ function Probabilistic(;
     resolution::Dates.Period,
     interval::Union{Nothing, Dates.Period} = nothing,
     percentiles,
-    scaling_factor_multiplier = nothing,
     normalization_factor = 1.0,
     internal = InfrastructureSystemsInternal(),
 )
@@ -68,7 +62,6 @@ function Probabilistic(;
         percentiles,
         resolution,
         interval,
-        scaling_factor_multiplier,
         internal,
     )
 end
@@ -87,9 +80,6 @@ Construct Probabilistic from a SortedDict of Arrays.
     Interval is required if the type is irregular, such as with Dates.Month or Dates.Year.
   - `normalization_factor::NormalizationFactor = 1.0`: optional normalization factor to apply
     to each data entry
-  - `scaling_factor_multiplier::Union{Nothing, Function} = nothing`: If the data are scaling
-    factors then this function will be called on the component and applied to the data when
-    [`get_time_series_array`](@ref) is called.
 """
 function Probabilistic(
     name::AbstractString,
@@ -98,7 +88,6 @@ function Probabilistic(
     resolution::Dates.Period;
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     return Probabilistic(;
         name = name,
@@ -106,7 +95,6 @@ function Probabilistic(
         percentiles = percentiles,
         resolution = resolution,
         interval = interval,
-        scaling_factor_multiplier = scaling_factor_multiplier,
         normalization_factor = normalization_factor,
         internal = InfrastructureSystemsInternal(),
     )
@@ -119,7 +107,6 @@ function Probabilistic(
     resolution::Dates.Period;
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     return Probabilistic(
         name,
@@ -128,7 +115,6 @@ function Probabilistic(
         resolution;
         interval = interval,
         normalization_factor = normalization_factor,
-        scaling_factor_multiplier = scaling_factor_multiplier,
     )
 end
 
@@ -148,9 +134,6 @@ Construct Probabilistic from a Dict of TimeArrays.
     Interval is required if the type is irregular, such as with Dates.Month or Dates.Year.
   - `normalization_factor::NormalizationFactor = 1.0`: optional normalization factor to apply
     to each data entry
-  - `scaling_factor_multiplier::Union{Nothing, Function} = nothing`: If the data are scaling
-    factors then this function will be called on the component and applied to the data when
-    [`get_time_series_array`](@ref) is called.
   - `timestamp = :timestamp`: If the values are DataFrames is passed then this must be the column name that
     contains timestamps.
 """
@@ -161,7 +144,6 @@ function Probabilistic(
     resolution::Union{Nothing, Dates.Period} = nothing,
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     data, res = convert_forecast_input_time_arrays(input_data; resolution = resolution)
     return Probabilistic(;
@@ -171,7 +153,6 @@ function Probabilistic(
         resolution = res,
         interval = interval,
         normalization_factor = normalization_factor,
-        scaling_factor_multiplier = scaling_factor_multiplier,
     )
 end
 
@@ -185,7 +166,6 @@ function Probabilistic(
     resolution::Dates.Period;
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     return Probabilistic(;
         name = name,
@@ -194,7 +174,6 @@ function Probabilistic(
         resolution = resolution,
         interval = interval,
         normalization_factor = normalization_factor,
-        scaling_factor_multiplier = scaling_factor_multiplier,
     )
 end
 
@@ -205,7 +184,6 @@ function Probabilistic(ts_metadata::ProbabilisticMetadata, data::SortedDict)
         resolution = get_resolution(ts_metadata),
         interval = get_interval(ts_metadata),
         data = data,
-        scaling_factor_multiplier = get_scaling_factor_multiplier(ts_metadata),
         internal = InfrastructureSystemsInternal(get_time_series_uuid(ts_metadata)),
     )
 end
@@ -219,7 +197,6 @@ function Probabilistic(info::TimeSeriesParsedInfo)
         percentiles = info.percentiles,
         resolution = info.resolution,
         normalization_factor = info.normalization_factor,
-        scaling_factor_multiplier = info.scaling_factor_multiplier,
     )
 end
 
@@ -231,8 +208,7 @@ two different attributes.
 """
 function Probabilistic(
     src::Probabilistic,
-    name::AbstractString;
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
+    name::AbstractString,
 )
     # units and ext are not copied
     internal = InfrastructureSystemsInternal(; uuid = get_uuid(src))
@@ -242,7 +218,6 @@ function Probabilistic(
         src.percentiles,
         src.resolution,
         src.interval,
-        scaling_factor_multiplier,
         internal,
     )
 end
@@ -257,7 +232,6 @@ function ProbabilisticMetadata(time_series::Probabilistic; features...)
         get_percentiles(time_series),
         get_uuid(time_series),
         get_horizon(time_series),
-        get_scaling_factor_multiplier(time_series),
         Dict{String, Any}(string(k) => v for (k, v) in features),
     )
 end
@@ -291,10 +265,6 @@ Get [`Probabilistic`](@ref) `data`.
 """
 get_data(value::Probabilistic) = value.data
 """
-Get [`Probabilistic`](@ref) `scaling_factor_multiplier`.
-"""
-get_scaling_factor_multiplier(value::Probabilistic) = value.scaling_factor_multiplier
-"""
 Get [`Probabilistic`](@ref) `internal`.
 """
 get_internal(value::Probabilistic) = value.internal
@@ -315,11 +285,6 @@ set_percentiles!(value::Probabilistic, val) = value.percentiles = val
 Set [`Probabilistic`](@ref) `data`.
 """
 set_data!(value::Probabilistic, val) = value.data = val
-"""
-Set [`Probabilistic`](@ref) `scaling_factor_multiplier`.
-"""
-set_scaling_factor_multiplier!(value::Probabilistic, val) =
-    value.scaling_factor_multiplier = val
 """
 Set [`Probabilistic`](@ref) `internal`.
 """

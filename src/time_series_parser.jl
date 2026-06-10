@@ -34,10 +34,6 @@ mutable struct TimeSeriesFileMetadata
     time_series_type::Type
     "Calling module must set."
     component::Union{Nothing, InfrastructureSystemsComponent}
-    "Applicable when data are scaling factors. Accessor function on component to apply to
-    values."
-    scaling_factor_multiplier::Union{Nothing, AbstractString}
-    scaling_factor_multiplier_module::Union{Nothing, AbstractString}
 end
 
 function TimeSeriesFileMetadata(;
@@ -51,8 +47,6 @@ function TimeSeriesFileMetadata(;
     percentiles,
     time_series_type_module,
     time_series_type,
-    scaling_factor_multiplier = nothing,
-    scaling_factor_multiplier_module = nothing,
 )
     return TimeSeriesFileMetadata(
         simulation,
@@ -65,8 +59,6 @@ function TimeSeriesFileMetadata(;
         percentiles,
         get_type_from_strings(time_series_type_module, time_series_type),
         nothing,
-        scaling_factor_multiplier,
-        scaling_factor_multiplier_module,
     )
 end
 
@@ -84,10 +76,6 @@ function read_time_series_file_metadata(file_path::AbstractString)
                 if !isa(normalization_factor, AbstractString)
                     normalization_factor = Float64(normalization_factor)
                 end
-                scaling_factor_multiplier =
-                    get(item, "scaling_factor_multiplier", nothing)
-                scaling_factor_multiplier_module =
-                    get(item, "scaling_factor_multiplier_module", nothing)
                 simulation = get(item, "simulation", "")
                 push!(
                     metadata,
@@ -107,8 +95,6 @@ function read_time_series_file_metadata(file_path::AbstractString)
                             "InfrastructureSystems",
                         ),
                         time_series_type = get(item, "type", "SingleTimeSeries"),
-                        scaling_factor_multiplier = scaling_factor_multiplier,
-                        scaling_factor_multiplier_module = scaling_factor_multiplier_module,
                     ),
                 )
             end
@@ -118,9 +104,6 @@ function read_time_series_file_metadata(file_path::AbstractString)
         csv = DataFrames.DataFrame(CSV.File(file_path))
         metadata = Vector{TimeSeriesFileMetadata}()
         for row in eachrow(csv)
-            scaling_factor_multiplier = get(row, :scaling_factor_multiplier, nothing)
-            scaling_factor_multiplier_module =
-                get(row, :scaling_factor_multiplier_module, nothing)
             simulation = get(row, :simulation, "")
             push!(
                 metadata,
@@ -135,8 +118,6 @@ function read_time_series_file_metadata(file_path::AbstractString)
                     percentiles = [],
                     time_series_type_module = get(row, :module, "InfrastructureSystems"),
                     time_series_type = get(row, :type, "SingleTimeSeries"),
-                    scaling_factor_multiplier = scaling_factor_multiplier,
-                    scaling_factor_multiplier_module = scaling_factor_multiplier_module,
                 ),
             )
         end
@@ -212,7 +193,6 @@ struct TimeSeriesParsedInfo
     percentiles::Vector{Float64}
     file_path::AbstractString
     resolution::Dates.Period
-    scaling_factor_multiplier::Union{Nothing, Function}
 
     function TimeSeriesParsedInfo(
         simulation,
@@ -223,7 +203,6 @@ struct TimeSeriesParsedInfo
         percentiles,
         file_path,
         resolution,
-        scaling_factor_multiplier = nothing,
     )
         return new(
             simulation,
@@ -234,35 +213,11 @@ struct TimeSeriesParsedInfo
             percentiles,
             abspath(file_path),
             resolution,
-            scaling_factor_multiplier,
         )
     end
 end
 
 function TimeSeriesParsedInfo(metadata::TimeSeriesFileMetadata, raw_data::RawTimeSeries)
-    if (
-        metadata.scaling_factor_multiplier === nothing &&
-        metadata.scaling_factor_multiplier_module !== nothing
-    ) || (
-        metadata.scaling_factor_multiplier !== nothing &&
-        metadata.scaling_factor_multiplier_module === nothing
-    )
-        throw(
-            DataFormatError(
-                "scaling_factor_multiplier and scaling_factor_multiplier_module must both be set or not set",
-            ),
-        )
-    end
-
-    if metadata.scaling_factor_multiplier === nothing
-        multiplier_func = nothing
-    else
-        multiplier_func = get_type_from_strings(
-            metadata.scaling_factor_multiplier_module,
-            metadata.scaling_factor_multiplier,
-        )
-    end
-
     if metadata.normalization_factor isa String
         if lowercase(metadata.normalization_factor) == "max"
             normalization_factor = NormalizationTypes.MAX
@@ -285,7 +240,6 @@ function TimeSeriesParsedInfo(metadata::TimeSeriesFileMetadata, raw_data::RawTim
         metadata.percentiles,
         metadata.data_file,
         metadata.resolution,
-        multiplier_func,
     )
 end
 

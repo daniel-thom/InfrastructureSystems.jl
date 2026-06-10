@@ -14,7 +14,6 @@ This file is auto-generated. Do not edit.
         percentiles::Vector{Float64}
         time_series_uuid::UUIDs.UUID
         horizon::Dates.Period
-        scaling_factor_multiplier::Union{Nothing, Function}
         features::Dict{String, Union{Bool, Int, String}}
         internal::InfrastructureSystemsInternal
     end
@@ -30,7 +29,6 @@ A Probabilistic forecast for a particular data field in a Component.
 - `percentiles::Vector{Float64}`: Percentiles for the probabilistic forecast
 - `time_series_uuid::UUIDs.UUID`: reference to time series data
 - `horizon::Dates.Period`: length of this time series
-- `scaling_factor_multiplier::Union{Nothing, Function}`: (default: `nothing`) Applicable when the time series data are scaling factors. Called on the associated component to convert the values.
 - `features::Dict{String, Union{Bool, Int, String}}`: (default: `Dict{String, Any}()`) User-defined tags that differentiate multiple time series arrays that represent the same component attribute, such as different arrays for different scenarios or years.
 - `internal::InfrastructureSystemsInternal`:
 """
@@ -50,19 +48,17 @@ mutable struct ProbabilisticMetadata <: ForecastMetadata
     time_series_uuid::UUIDs.UUID
     "length of this time series"
     horizon::Dates.Period
-    "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
-    scaling_factor_multiplier::Union{Nothing, Function}
     "User-defined tags that differentiate multiple time series arrays that represent the same component attribute, such as different arrays for different scenarios or years."
     features::Dict{String, Union{Bool, Int, String}}
     internal::InfrastructureSystemsInternal
 end
 
-function ProbabilisticMetadata(name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, scaling_factor_multiplier=nothing, features=Dict{String, Any}(), )
-    ProbabilisticMetadata(name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, scaling_factor_multiplier, features, InfrastructureSystemsInternal(), )
+function ProbabilisticMetadata(name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, features=Dict{String, Any}(), )
+    ProbabilisticMetadata(name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, features, InfrastructureSystemsInternal(), )
 end
 
-function ProbabilisticMetadata(; name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, scaling_factor_multiplier=nothing, features=Dict{String, Any}(), internal=InfrastructureSystemsInternal(), )
-    ProbabilisticMetadata(name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, scaling_factor_multiplier, features, internal, )
+function ProbabilisticMetadata(; name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, features=Dict{String, Any}(), internal=InfrastructureSystemsInternal(), )
+    ProbabilisticMetadata(name, initial_timestamp, resolution, interval, count, percentiles, time_series_uuid, horizon, features, internal, )
 end
 
 """Get [`ProbabilisticMetadata`](@ref) `name`."""
@@ -81,8 +77,6 @@ get_percentiles(value::ProbabilisticMetadata) = value.percentiles
 get_time_series_uuid(value::ProbabilisticMetadata) = value.time_series_uuid
 """Get [`ProbabilisticMetadata`](@ref) `horizon`."""
 get_horizon(value::ProbabilisticMetadata) = value.horizon
-"""Get [`ProbabilisticMetadata`](@ref) `scaling_factor_multiplier`."""
-get_scaling_factor_multiplier(value::ProbabilisticMetadata) = value.scaling_factor_multiplier
 """Get [`ProbabilisticMetadata`](@ref) `features`."""
 get_features(value::ProbabilisticMetadata) = value.features
 """Get [`ProbabilisticMetadata`](@ref) `internal`."""
@@ -104,8 +98,6 @@ set_percentiles!(value::ProbabilisticMetadata, val) = value.percentiles = val
 set_time_series_uuid!(value::ProbabilisticMetadata, val) = value.time_series_uuid = val
 """Set [`ProbabilisticMetadata`](@ref) `horizon`."""
 set_horizon!(value::ProbabilisticMetadata, val) = value.horizon = val
-"""Set [`ProbabilisticMetadata`](@ref) `scaling_factor_multiplier`."""
-set_scaling_factor_multiplier!(value::ProbabilisticMetadata, val) = value.scaling_factor_multiplier = val
 """Set [`ProbabilisticMetadata`](@ref) `features`."""
 set_features!(value::ProbabilisticMetadata, val) = value.features = val
 """Set [`ProbabilisticMetadata`](@ref) `internal`."""

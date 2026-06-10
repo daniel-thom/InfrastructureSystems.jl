@@ -8,7 +8,6 @@ function DeterministicMetadata(ts::AbstractDeterministic; features...)
         get_uuid(ts),
         get_horizon(ts),
         typeof(ts),
-        get_scaling_factor_multiplier(ts),
         Dict{String, Any}(string(k) => v for (k, v) in features),
     )
 end

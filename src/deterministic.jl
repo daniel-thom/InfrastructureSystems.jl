@@ -4,7 +4,6 @@
         data::SortedDict
         resolution::Dates.Period
         interval::Dates.Period
-        scaling_factor_multiplier::Union{Nothing, Function}
         internal::InfrastructureSystemsInternal
     end
 
@@ -16,8 +15,6 @@ A deterministic forecast for a particular data field in a Component.
   - `data::SortedDict`: timestamp - scalingfactor
   - `resolution::Dates.Period`: forecast resolution
   - `interval::Dates.Period`: forecast interval
-  - `scaling_factor_multiplier::Union{Nothing, Function}`: Applicable when the time series
-    data are scaling factors. Called on the associated component to convert the values.
   - `internal::InfrastructureSystemsInternal`
 """
 mutable struct Deterministic <: AbstractDeterministic
@@ -29,8 +26,6 @@ mutable struct Deterministic <: AbstractDeterministic
     resolution::Dates.Period
     "forecast interval"
     interval::Dates.Period
-    "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
-    scaling_factor_multiplier::Union{Nothing, Function}
     internal::InfrastructureSystemsInternal
 
     function Deterministic(
@@ -38,7 +33,6 @@ mutable struct Deterministic <: AbstractDeterministic
         data::SortedDict,
         resolution::Dates.Period,
         interval::Dates.Period,
-        scaling_factor_multiplier::Union{Nothing, Function},
         internal::InfrastructureSystemsInternal,
     )
         validate_time_series_data_for_hdf(data)
@@ -47,7 +41,6 @@ mutable struct Deterministic <: AbstractDeterministic
             data,
             resolution,
             interval,
-            scaling_factor_multiplier,
             internal,
         )
     end
@@ -58,7 +51,6 @@ function Deterministic(;
     data,
     resolution,
     interval::Union{Nothing, Dates.Period} = nothing,
-    scaling_factor_multiplier = nothing,
     normalization_factor = 1.0,
     internal = InfrastructureSystemsInternal(),
 )
@@ -72,7 +64,6 @@ function Deterministic(;
         data,
         resolution,
         interval,
-        scaling_factor_multiplier,
         internal,
     )
 end
@@ -83,14 +74,12 @@ function Deterministic(
     resolution::Dates.Period;
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     return Deterministic(;
         name = name,
         data = data,
         resolution = resolution,
         interval = interval,
-        scaling_factor_multiplier = scaling_factor_multiplier,
         internal = InfrastructureSystemsInternal(),
     )
 end
@@ -112,9 +101,6 @@ Construct Deterministic from a Dict of TimeArrays.
     Dates.Year.
   - `normalization_factor::NormalizationFactor = 1.0`: optional normalization factor to apply
     to each data entry
-  - `scaling_factor_multiplier::Union{Nothing, Function} = nothing`: If the data are scaling
-    factors then this function will be called on the component and applied to the data when
-    [`get_time_series_array`](@ref) is called.
   - `timestamp = :timestamp`: If the values are DataFrames is passed then this must be the
     column name that contains timestamps.
 """
@@ -124,7 +110,6 @@ function Deterministic(
     resolution::Union{Nothing, Dates.Period} = nothing,
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     data, res = convert_forecast_input_time_arrays(input_data; resolution = resolution)
     for (k, v) in input_data
@@ -139,7 +124,6 @@ function Deterministic(
         resolution = res,
         interval = interval,
         normalization_factor = normalization_factor,
-        scaling_factor_multiplier = scaling_factor_multiplier,
     )
 end
 
@@ -154,9 +138,6 @@ DateTime format and the columns the values in the forecast window.
   - `component::InfrastructureSystemsComponent`: component associated with the data
   - `normalization_factor::NormalizationFactor = 1.0`: optional normalization factor to apply
     to each data entry
-  - `scaling_factor_multiplier::Union{Nothing, Function} = nothing`: If the data are scaling
-    factors then this function will be called on the component and applied to the data when
-    [`get_time_series_array`](@ref) is called.
 """
 function Deterministic(
     name::AbstractString,
@@ -165,7 +146,6 @@ function Deterministic(
     resolution::Dates.Period;
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     component_name = get_name(component)
     raw_data = read_time_series(Deterministic, filename, component_name)
@@ -175,7 +155,6 @@ function Deterministic(
         resolution;
         interval = interval,
         normalization_factor = normalization_factor,
-        scaling_factor_multiplier = scaling_factor_multiplier,
     )
 end
 
@@ -188,7 +167,6 @@ function Deterministic(
     resolution::Dates.Period;
     interval::Union{Nothing, Dates.Period} = nothing,
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     return Deterministic(;
         name = name,
@@ -196,7 +174,6 @@ function Deterministic(
         resolution = resolution,
         interval = interval,
         normalization_factor = normalization_factor,
-        scaling_factor_multiplier = scaling_factor_multiplier,
     )
 end
 
@@ -206,7 +183,6 @@ function Deterministic(ts_metadata::DeterministicMetadata, data::SortedDict)
         resolution = get_resolution(ts_metadata),
         interval = get_interval(ts_metadata),
         data = data,
-        scaling_factor_multiplier = get_scaling_factor_multiplier(ts_metadata),
         internal = InfrastructureSystemsInternal(get_time_series_uuid(ts_metadata)),
     )
 end
@@ -219,7 +195,6 @@ function Deterministic(info::TimeSeriesParsedInfo)
         info.data,
         info.resolution;
         normalization_factor = info.normalization_factor,
-        scaling_factor_multiplier = info.scaling_factor_multiplier,
     )
 end
 
@@ -262,22 +237,19 @@ forecast_max_active_power = Deterministic(
     "max_active_power",
     data,
     resolution,
-    scaling_factor_multiplier = get_max_active_power,
 )
 add_time_series!(sys, generator, forecast_max_active_power)
 # Reuse time series for second attribute
 forecast_max_reactive_power = Deterministic(
     forecast_max_active_power,
-    "max_reactive_power"
-    scaling_factor_multiplier = get_max_reactive_power,
+    "max_reactive_power",
 )
 add_time_series!(sys, generator, forecast_max_reactive_power)
 ```
 """
 function Deterministic(
     src::Deterministic,
-    name::AbstractString;
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
+    name::AbstractString,
 )
     # units and ext are not copied
     internal = InfrastructureSystemsInternal(; uuid = get_uuid(src))
@@ -286,7 +258,6 @@ function Deterministic(
         src.data,
         src.resolution,
         src.interval,
-        scaling_factor_multiplier,
         internal,
     )
 end
@@ -334,11 +305,6 @@ Get [`Deterministic`](@ref) `interval`.
 get_interval(value::Deterministic) = value.interval
 
 """
-Get [`Deterministic`](@ref) `scaling_factor_multiplier`.
-"""
-get_scaling_factor_multiplier(value::Deterministic) = value.scaling_factor_multiplier
-
-"""
 Get [`Deterministic`](@ref) `internal`.
 """
 get_internal(value::Deterministic) = value.internal
@@ -357,12 +323,6 @@ set_data!(value::Deterministic, val) = value.data = val
 Set [`Deterministic`](@ref) `resolution`.
 """
 set_resolution!(value::Deterministic, val) = value.resolution = val
-
-"""
-Set [`Deterministic`](@ref) `scaling_factor_multiplier`.
-"""
-set_scaling_factor_multiplier!(value::Deterministic, val) =
-    value.scaling_factor_multiplier = val
 
 """
 Set [`Deterministic`](@ref) `internal`.

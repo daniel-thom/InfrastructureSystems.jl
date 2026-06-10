@@ -2,7 +2,6 @@
     mutable struct SingleTimeSeries <: StaticTimeSeries
         name::String
         data::TimeSeries.TimeArray
-        scaling_factor_multiplier::Union{Nothing, Function}
         internal::InfrastructureSystemsInternal
     end
 
@@ -17,8 +16,6 @@ such as a series of historical measurements or realizations or a single scenario
   - `name::String`: user-defined name
   - `data::TimeSeries.TimeArray`: timestamp - scalingfactor
   - `resolution::Dates.Period`: Time duration between steps in the time series. The resolution must be the same throughout the time series
-  - `scaling_factor_multiplier::Union{Nothing, Function}`: Applicable when the time series
-    data are scaling factors. Called on the associated component to convert the values.
   - `internal::InfrastructureSystemsInternal`
 """
 mutable struct SingleTimeSeries{T} <: StaticTimeSeries
@@ -28,8 +25,6 @@ mutable struct SingleTimeSeries{T} <: StaticTimeSeries
     data::TimeSeries.TimeArray
     "resolution of the time series. The resolution cannot change during the time series."
     resolution::Dates.Period
-    "Applicable when the time series data are scaling factors. Called on the associated component to convert the values."
-    scaling_factor_multiplier::Union{Nothing, Function}
     internal::InfrastructureSystemsInternal
 end
 
@@ -40,14 +35,12 @@ function SingleTimeSeries(
     name,
     data::TimeSeries.TimeArray,
     resolution,
-    scaling_factor_multiplier,
     internal::InfrastructureSystemsInternal,
 )
     return SingleTimeSeries{eltype(TimeSeries.values(data))}(
         name,
         data,
         resolution,
-        scaling_factor_multiplier,
         internal,
     )
 end
@@ -56,7 +49,6 @@ function SingleTimeSeries(;
     name,
     data,
     resolution::Union{Nothing, Dates.Period} = nothing,
-    scaling_factor_multiplier = nothing,
     normalization_factor = 1.0,
     internal = InfrastructureSystemsInternal(),
 )
@@ -68,7 +60,6 @@ function SingleTimeSeries(;
         name,
         data,
         resolution,
-        scaling_factor_multiplier,
         internal,
     )
 end
@@ -87,8 +78,7 @@ two different attribtues.
 """
 function SingleTimeSeries(
     src::SingleTimeSeries,
-    name::AbstractString;
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
+    name::AbstractString,
 )
     # units and ext are not copied
     internal = InfrastructureSystemsInternal(; uuid = get_uuid(src))
@@ -96,7 +86,6 @@ function SingleTimeSeries(
         name,
         src.data,
         src.resolution,
-        scaling_factor_multiplier,
         internal,
     )
 end
@@ -110,9 +99,6 @@ Construct SingleTimeSeries from a TimeArray or DataFrame.
   - `data::Union{TimeSeries.TimeArray, DataFrames.DataFrame}`: time series data
   - `normalization_factor::NormalizationFactor = 1.0`: optional normalization factor to apply
     to each data entry
-  - `scaling_factor_multiplier::Union{Nothing, Function} = nothing`: If the data are scaling
-    factors then this function will be called on the component and applied to the data when
-    [`get_time_series_array`](@ref) is called.
   - `timestamp::Symbol = :timestamp`: If a DataFrame is passed then this must be the column name that
     contains timestamps.
   - `resolution::Union{Nothing, Dates.Period} = nothing`: If nothing, infer resolution from
@@ -124,7 +110,6 @@ function SingleTimeSeries(
     name::AbstractString,
     data::Union{TimeSeries.TimeArray, DataFrames.DataFrame};
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
     timestamp::Symbol = :timestamp,
     resolution::Union{Nothing, Dates.Period} = nothing,
 )
@@ -146,7 +131,6 @@ function SingleTimeSeries(
         name = name,
         data = ta,
         resolution = resolution,
-        scaling_factor_multiplier = scaling_factor_multiplier,
         normalization_factor = normalization_factor,
         internal = InfrastructureSystemsInternal(),
     )
@@ -164,9 +148,6 @@ component.
   - `resolution::Dates.Period`: resolution of the time series
   - `normalization_factor::NormalizationFactor = 1.0`: optional normalization factor to apply
     to each data entry
-  - `scaling_factor_multiplier::Union{Nothing, Function} = nothing`: If the data are scaling
-    factors then this function will be called on the component and applied to the data when
-    [`get_time_series_array`](@ref) is called.
 """
 function SingleTimeSeries(
     name::AbstractString,
@@ -174,7 +155,6 @@ function SingleTimeSeries(
     component::InfrastructureSystemsComponent,
     resolution::Dates.Period;
     normalization_factor::NormalizationFactor = 1.0,
-    scaling_factor_multiplier::Union{Nothing, Function} = nothing,
 )
     component_name = get_name(component)
     raw = read_time_series(SingleTimeSeries, filename, component_name)
@@ -183,7 +163,6 @@ function SingleTimeSeries(
         name = name,
         data = ta,
         normalization_factor = normalization_factor,
-        scaling_factor_multiplier = scaling_factor_multiplier,
     )
 end
 
@@ -214,7 +193,6 @@ function SingleTimeSeries(time_series::Vector{SingleTimeSeries})
     time_series = SingleTimeSeries(;
         name = get_name(time_series[1]),
         data = ta,
-        scaling_factor_multiplier = time_series[1].scaling_factor_multiplier,
     )
     @debug "concatenated time_series" LOG_GROUP_TIME_SERIES time_series
     return time_series
@@ -225,7 +203,6 @@ function SingleTimeSeries(ts_metadata::SingleTimeSeriesMetadata, data::TimeSerie
         get_name(ts_metadata),
         data,
         get_resolution(ts_metadata),
-        get_scaling_factor_multiplier(ts_metadata),
         InfrastructureSystemsInternal(get_time_series_uuid(ts_metadata)),
     )
 end
@@ -244,7 +221,6 @@ function SingleTimeSeriesMetadata(ts::SingleTimeSeries; features...)
         get_initial_timestamp(ts),
         get_uuid(ts),
         length(ts),
-        get_scaling_factor_multiplier(ts),
         Dict{String, Any}(string(k) => v for (k, v) in features),
     )
 end
@@ -255,7 +231,6 @@ function SingleTimeSeries(info::TimeSeriesParsedInfo)
         name = info.name,
         data = data,
         normalization_factor = info.normalization_factor,
-        scaling_factor_multiplier = info.scaling_factor_multiplier,
     )
 end
 
@@ -292,10 +267,6 @@ Get [`SingleTimeSeries`](@ref) `resolution`.
 """
 get_resolution(value::SingleTimeSeries) = value.resolution
 """
-Get [`SingleTimeSeries`](@ref) `scaling_factor_multiplier`.
-"""
-get_scaling_factor_multiplier(value::SingleTimeSeries) = value.scaling_factor_multiplier
-"""
 Get [`SingleTimeSeries`](@ref) `internal`.
 """
 get_internal(value::SingleTimeSeries) = value.internal
@@ -308,11 +279,6 @@ set_name!(value::SingleTimeSeries, val) = value.name = val
 Set [`SingleTimeSeries`](@ref) `data`.
 """
 set_data!(value::SingleTimeSeries, val) = value.data = val
-"""
-Set [`SingleTimeSeries`](@ref) `scaling_factor_multiplier`.
-"""
-set_scaling_factor_multiplier!(value::SingleTimeSeries, val) =
-    value.scaling_factor_multiplier = val
 """
 Set [`SingleTimeSeries`](@ref) `internal`.
 """
@@ -441,7 +407,6 @@ function SingleTimeSeriesMetadata(ts_metadata::DeterministicMetadata)
         initial_timestamp = get_initial_timestamp(ts_metadata),
         time_series_uuid = get_time_series_uuid(ts_metadata),
         length = get_count(ts_metadata) * get_horizon_count(ts_metadata),
-        scaling_factor_multiplier = get_scaling_factor_multiplier(ts_metadata),
         internal = get_internal(ts_metadata),
     )
 end

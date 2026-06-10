@@ -123,14 +123,6 @@ _get_owner_category(
 # FunctionData tuples store as a `(length, k)` Float64 array; reconstruction keys
 # on the `logical_type` tag returned by `get_metadata`.
 
-# A scaling_factor_multiplier is an IS `Function` serialized to a JSON string for
-# storage (matching the legacy on-disk encoding) and rebuilt on read.
-_serialize_sfm(::Nothing) = nothing
-_serialize_sfm(sfm) = JSON3.write(serialize(sfm))
-_deserialize_sfm(::Nothing) = nothing
-_deserialize_sfm(s::AbstractString) =
-    deserialize(Function, JSON3.read(s, Dict{String, Any}))
-
 _storage_array(v::AbstractVector{<:Real}) = (collect(v), string(eltype(v)))
 
 function _storage_array(v::AbstractVector{LinearFunctionData})
@@ -251,7 +243,7 @@ end
 
 """
     serialize_single!(store, owner_uuid, owner_type, owner_category, name, sts;
-                      features=Dict(), units=nothing, scaling_factor_multiplier=nothing)
+                      features=Dict(), units=nothing)
 
 Add a `SingleTimeSeries` (data + metadata) to the Rust store. The array is
 content-addressed; identical arrays are de-duplicated automatically.
@@ -265,19 +257,17 @@ function serialize_single!(
     sts::SingleTimeSeries;
     features = Dict{String, Any}(),
     units::Union{Nothing, AbstractString} = nothing,
-    scaling_factor_multiplier::Union{Nothing, AbstractString} = nothing,
 )
     # Encode the values: scalars stay 1-D; FunctionData becomes a (length, k)
     # Float64 matrix. The logical-type tag drives reconstruction on read.
     arr, logical = _storage_array(TimeSeries.values(get_data(sts)))
-    # `name` and `scaling_factor_multiplier` are carried on the binding struct
-    # (matching the InfrastructureSystems.jl object shape), not on add_time_series!.
+    # `name` is carried on the binding struct (matching the
+    # InfrastructureSystems.jl object shape), not on add_time_series!.
     tss_ts = TSS.SingleTimeSeries(
         get_initial_timestamp(sts),
         get_resolution(sts),
         arr,
         name;
-        scaling_factor_multiplier = scaling_factor_multiplier,
         logical_type = logical,
     )
     TSS.add_time_series!(store.inner, owner_uuid, owner_type, _tss_category(owner_category),
@@ -483,10 +473,7 @@ function _rust_add_time_series!(
     end
 
     serialize_single!(store, owner_uuid, owner_type, owner_category, name, time_series;
-        features = feats,
-        scaling_factor_multiplier = _serialize_sfm(
-            get_scaling_factor_multiplier(time_series),
-        ))
+        features = feats)
     _rust_assign_stored_uuid!(store, time_series, owner_uuid, name, TSS.TS_TYPE_SINGLE;
         resolution = resolution, features = feats)
     return StaticTimeSeriesKey(;
@@ -572,7 +559,6 @@ function _rust_get_time_series(
         name = String(name),
         data = TimeSeries.TimeArray(collect(timestamps), vals),
         resolution = meta.resolution,
-        scaling_factor_multiplier = get_scaling_factor_multiplier(matched),
     )
     set_uuid!(get_internal(sts), _rust_ts_uuid(meta.data_hash))
     return sts
@@ -600,7 +586,6 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
     resolution = get_resolution(ts)
     interval = get_interval(ts)
     feats = _rust_features(features)
-    sfm = _serialize_sfm(get_scaling_factor_multiplier(ts))
 
     # All forecasts that share a (resolution, interval) group must agree on the
     # window parameters (count, horizon, initial timestamp).
@@ -620,8 +605,7 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
         end
         arr = Float64.(get_array_for_hdf(ts))  # (percentile_count, horizon_count, count)
         prob = TSS.Probabilistic(get_initial_timestamp(ts), resolution, get_horizon(ts),
-            interval, get_count(ts), Float64.(get_percentiles(ts)), arr, name;
-            scaling_factor_multiplier = sfm)
+            interval, get_count(ts), Float64.(get_percentiles(ts)), arr, name)
         TSS.add_time_series!(store.inner, owner_uuid, owner_type,
             _tss_category(owner_category), prob; features = feats)
         _rust_assign_stored_uuid!(store, ts, owner_uuid, name, TSS.TS_TYPE_PROBABILISTIC;
@@ -661,7 +645,7 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
         ) ||
             serialize_single!(store, owner_uuid, owner_type, owner_category, name,
                 underlying;
-                features = feats, scaling_factor_multiplier = sfm)
+                features = feats)
         TSS.transform_single_time_series!(store.inner, get_horizon(ts), interval;
             owner_category = _tss_category(owner_category), resolution = resolution)
         # DeterministicSingleTimeSeries has no internal UUID, so nothing to assign.
@@ -693,12 +677,10 @@ function _rust_add_forecast!(mgr::TimeSeriesManager, owner, ts; features...)
     end
     tss_ts = if ts_type == TSS.TS_TYPE_DETERMINISTIC
         TSS.Deterministic(get_initial_timestamp(ts), resolution, get_horizon(ts),
-        interval, count, arr, name; scaling_factor_multiplier = sfm,
-        logical_type = logical)
+        interval, count, arr, name; logical_type = logical)
     else
         TSS.Scenarios(get_initial_timestamp(ts), resolution, get_horizon(ts),
-        interval, count, arr, name; scaling_factor_multiplier = sfm,
-        logical_type = logical)
+        interval, count, arr, name; logical_type = logical)
     end
     TSS.add_time_series!(store.inner, owner_uuid, owner_type,
         _tss_category(owner_category), tss_ts; features = feats)
@@ -764,7 +746,6 @@ function _rust_get_forecast(
         _rust_get_metadata(owner, Forecast, name; resolution = resolution, features...)
     feats = Dict{String, Any}(string(k) => v for (k, v) in get_features(matched))
     resolution = get_resolution(matched)
-    sfm = get_scaling_factor_multiplier(matched)
     # `len`, when given, truncates each window to its first `len` horizon steps
     # (the horizon is the leading axis of a window vector or matrix).
     _truncate(w) = isnothing(len) ? w : (ndims(w) == 1 ? w[1:len] : w[1:len, :])
@@ -788,8 +769,7 @@ function _rust_get_forecast(
         end
         result = Probabilistic(; name = String(name), data = data,
             percentiles = p.percentiles, resolution = p.resolution,
-            interval = p.interval,
-            scaling_factor_multiplier = sfm)
+            interval = p.interval)
         _rust_assign_stored_uuid!(store, result, owner_uuid, name,
             TSS.TS_TYPE_PROBABILISTIC;
             resolution = resolution, features = feats)
@@ -821,8 +801,7 @@ function _rust_get_forecast(
             for i in s:(s + n - 1)
         )
         result = Deterministic(; name = String(name), data = data,
-            resolution = d.resolution, interval = d.interval,
-            scaling_factor_multiplier = sfm)
+            resolution = d.resolution, interval = d.interval)
         set_uuid!(get_internal(result), _rust_ts_uuid(fmeta.data_hash))
         return result
     elseif has_typed(store, owner_uuid, name, TSS.TS_TYPE_DETERMINISTIC_SINGLE;
@@ -850,8 +829,6 @@ function _rust_get_forecast(
             )
         end
         sts = get_single(store, owner_uuid, name; resolution = resolution, features = feats)
-        # The DST delegates its scaling factor to the underlying SingleTimeSeries.
-        set_scaling_factor_multiplier!(sts, sfm)
         # When a single window spans the whole series (count == 1 and the interval
         # equals the horizon), IS represents the interval as `Second(0)`; otherwise
         # the stored interval is kept.
@@ -874,8 +851,7 @@ function _rust_get_forecast(
         end
         result = Scenarios(; name = String(name), data = data,
             scenario_count = s_ts.scenario_count,
-            resolution = s_ts.resolution, interval = s_ts.interval,
-            scaling_factor_multiplier = sfm)
+            resolution = s_ts.resolution, interval = s_ts.interval)
         _rust_assign_stored_uuid!(store, result, owner_uuid, name, TSS.TS_TYPE_SCENARIOS;
             resolution = resolution, features = feats)
         return result
@@ -1009,7 +985,6 @@ _rust_type_matches(row_type::Type, ::Type{T}) where {T <: TimeSeriesData} =
 function _metadata_from_row(row)
     feats = Dict{String, Union{Bool, Int, String}}(row.features)
     uuid = _rust_ts_uuid(row.data_hash)
-    sfm = _deserialize_sfm(row.scaling_factor_multiplier)
     is_type = _rust_is_type(row.time_series_type)
     if is_type <: SingleTimeSeries
         return SingleTimeSeriesMetadata(;
@@ -1018,7 +993,6 @@ function _metadata_from_row(row)
             initial_timestamp = row.initial_timestamp,
             time_series_uuid = uuid,
             length = row.length,
-            scaling_factor_multiplier = sfm,
             features = feats,
         )
     elseif is_type <: AbstractDeterministic
@@ -1031,7 +1005,6 @@ function _metadata_from_row(row)
             time_series_uuid = uuid,
             horizon = row.horizon,
             time_series_type = is_type,
-            scaling_factor_multiplier = sfm,
             features = feats,
         )
     elseif is_type <: Probabilistic
@@ -1044,7 +1017,6 @@ function _metadata_from_row(row)
             percentiles = row.percentiles,
             time_series_uuid = uuid,
             horizon = row.horizon,
-            scaling_factor_multiplier = sfm,
             features = feats,
         )
     elseif is_type <: Scenarios
@@ -1059,7 +1031,6 @@ function _metadata_from_row(row)
             count = row.count,
             time_series_uuid = uuid,
             horizon = row.horizon,
-            scaling_factor_multiplier = sfm,
             features = feats,
         )
     end
