@@ -37,13 +37,23 @@ supplemental-attribute operations can reach the owning [`TimeSeriesManager`](@re
 end
 
 """
+Sentinel value for the integer `id` of a component or supplemental attribute that has not
+yet been attached to a [`SystemData`](@ref). Assigned IDs start at 1.
+"""
+const UNASSIGNED_ID = 0
+
+"""
 Internal storage common to [`InfrastructureSystemsType`](@ref)s.
 
-Every component and supplemental attribute carries a UUID, optional
+Components and supplemental attributes are identified by an integer `id` assigned by the
+owning [`SystemData`](@ref) when they are attached (see [`get_id`](@ref)); it is
+[`UNASSIGNED_ID`](@ref) until then. The `uuid` is retained for time series, whose content
+and metadata are still identified by UUID. Each instance also holds optional
 [`SharedSystemReferences`](@ref) when attached to a system, optional unit metadata, and an
 optional user extension dictionary accessed through [`get_ext`](@ref).
 """
 mutable struct InfrastructureSystemsInternal <: InfrastructureSystemsType
+    id::Int
     uuid::Base.UUID
     shared_system_references::Union{Nothing, SharedSystemReferences}
     units_info::Union{Nothing, SystemUnitsSettings}
@@ -51,21 +61,22 @@ mutable struct InfrastructureSystemsInternal <: InfrastructureSystemsType
 end
 
 """
-Creates InfrastructureSystemsInternal with a new UUID.
+Creates InfrastructureSystemsInternal with a new UUID and an unassigned integer id.
 """
 InfrastructureSystemsInternal(;
+    id = UNASSIGNED_ID,
     uuid = make_uuid(),
     shared_system_references = nothing,
     units_info = nothing,
     ext = nothing,
 ) =
-    InfrastructureSystemsInternal(uuid, shared_system_references, units_info, ext)
+    InfrastructureSystemsInternal(id, uuid, shared_system_references, units_info, ext)
 
 """
 Creates InfrastructureSystemsInternal with an existing UUID.
 """
 InfrastructureSystemsInternal(u::Base.UUID) =
-    InfrastructureSystemsInternal(u, nothing, nothing, nothing)
+    InfrastructureSystemsInternal(UNASSIGNED_ID, u, nothing, nothing, nothing)
 
 """
 Return a user-modifiable dictionary to store extra information.
@@ -89,6 +100,9 @@ end
 get_uuid(internal::InfrastructureSystemsInternal) = internal.uuid
 set_uuid!(internal::InfrastructureSystemsInternal, uuid) = internal.uuid = uuid
 
+get_id(internal::InfrastructureSystemsInternal) = internal.id
+set_id!(internal::InfrastructureSystemsInternal, id::Int) = internal.id = id
+
 function set_shared_system_references!(
     internal::InfrastructureSystemsInternal,
     refs::Union{Nothing, SharedSystemReferences},
@@ -105,6 +119,22 @@ Gets the UUID for any InfrastructureSystemsType.
 """
 function get_uuid(obj::InfrastructureSystemsType)
     return get_internal(obj).uuid
+end
+
+"""
+Gets the integer id of a component or supplemental attribute. Returns [`UNASSIGNED_ID`](@ref)
+if the object has not been attached to a [`SystemData`](@ref).
+"""
+function get_id(obj::InfrastructureSystemsType)
+    return get_internal(obj).id
+end
+
+"""
+Sets the integer id of a component or supplemental attribute.
+"""
+function set_id!(obj::InfrastructureSystemsType, id::Int)
+    set_id!(get_internal(obj), id)
+    return
 end
 
 """
@@ -152,7 +182,7 @@ function compare_values(
 )
     match = true
     for name in fieldnames(InfrastructureSystemsInternal)
-        if name in exclude || (name == :uuid && !compare_uuids) ||
+        if name in exclude || (name in (:uuid, :id) && !compare_uuids) ||
            name == :shared_system_references
             continue
         end
