@@ -1,7 +1,7 @@
 name = "InfrastructureSystems"
 uuid = "2cd47ed4-ca9b-11e9-27f2-ab636a7671f1"
-authors = ["Daniel Thom", "Jose Daniel Lara", "Gabriel Konar-Steenberg", "Clayton Barrows"]
 version = "3.6.0"
+authors = ["Daniel Thom", "Jose Daniel Lara", "Gabriel Konar-Steenberg", "Clayton Barrows"]
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
@@ -55,7 +55,7 @@ Random = "1"
 SHA = "0.7"
 SQLite = "^1.6"
 Serialization = "1"
-StringTemplates = "0.1.0"
+StringTemplates = "0.1.0, 0.3"
 StructTypes = "^1.9"
 TOML = "1"
 Tables = "^1.11"
